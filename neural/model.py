@@ -90,7 +90,7 @@ class NexusEnsemble(nn.Module):
             torch.softmax(m(x), dim=-1) * w
             for m, w in zip(self.models, self.weights)
         ]
-        return sum(outputs)
+        return torch.stack(outputs).sum(dim=0)
 
     def predict_proba(self, x: torch.Tensor) -> np.ndarray:
         self.eval()

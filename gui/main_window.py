@@ -43,18 +43,18 @@ class TradesTable(QTableWidget):
     async def _on_trade(self, _e: str, data: dict):
         row = self.rowCount()
         self.insertRow(row)
-        ts  = datetime.now().strftime("%H:%M:%S")
-        out = data.get("outcome", "")
+        ts   = datetime.now().strftime("%H:%M:%S")
+        out  = data.get("outcome", "")
         prof = data.get("profit", 0.0)
         vals = [
             ts,
-            data.get("symbol",        "──"),
-            data.get("contract_type", "──"),
+            data.get("symbol",        "\u2500\u2500"),
+            data.get("contract_type", "\u2500\u2500"),
             f"$ {data.get('stake', 0):.2f}",
             f"{prof:+.2f}",
             out,
             f"{data.get('confidence', 0):.2f}",
-            data.get("strategy_name", "──"),
+            data.get("strategy_name", "\u2500\u2500"),
         ]
         colors = {
             4: "#00ff88" if prof >= 0 else "#ff4444",
@@ -121,7 +121,7 @@ class HeaderBar(QFrame):
         title_box = QVBoxLayout()
         lbl_title = QLabel("NEXUS QUANTUM ULTRA")
         lbl_title.setObjectName("lbl_title")
-        lbl_sub   = QLabel("MULTI-SYMBOL AI TRADING SYSTEM  ·  DERIV SYNTHETIC INDICES")
+        lbl_sub   = QLabel("MULTI-SYMBOL AI TRADING SYSTEM  \u00b7  DERIV SYNTHETIC INDICES")
         lbl_sub.setObjectName("lbl_subtitle")
         title_box.addWidget(lbl_title)
         title_box.addWidget(lbl_sub)
@@ -130,12 +130,12 @@ class HeaderBar(QFrame):
 
         stats_box = QHBoxLayout()
         stats_box.setSpacing(24)
-        self.lbl_balance = self._stat("SALDO",    "──────",   "#00d4ff")
-        self.lbl_pnl     = self._stat("P&L",      "──────",   "#00ff88")
+        self.lbl_balance = self._stat("SALDO",    "\u2500\u2500\u2500\u2500\u2500\u2500", "#00d4ff")
+        self.lbl_pnl     = self._stat("P&L",      "\u2500\u2500\u2500\u2500\u2500\u2500", "#00ff88")
         self.lbl_trades  = self._stat("TRADES",   "0",        "#ffd700")
-        self.lbl_winrate = self._stat("WIN RATE", "──",       "#a78bfa")
-        self.lbl_conn    = self._stat("DERIV",    "⬤ OFF",    "#ff4444")
-        self.lbl_time    = self._stat("HORA",     "──:──:──", "#4a6a9a")
+        self.lbl_winrate = self._stat("WIN RATE", "\u2500\u2500",       "#a78bfa")
+        self.lbl_conn    = self._stat("DERIV",    "\u2b24 OFF",    "#ff4444")
+        self.lbl_time    = self._stat("HORA",     "\u2500\u2500:\u2500\u2500:\u2500\u2500", "#4a6a9a")
         for box in [self.lbl_balance, self.lbl_pnl, self.lbl_trades,
                     self.lbl_winrate, self.lbl_conn, self.lbl_time]:
             stats_box.addLayout(box["layout"])
@@ -143,12 +143,13 @@ class HeaderBar(QFrame):
         layout.addSpacing(20)
 
         btn_box = QHBoxLayout()
-        self.btn_start = QPushButton("▶  INICIAR")
+        self.btn_start = QPushButton("\u25b6  INICIAR")
         self.btn_start.setObjectName("btn_start")
         self.btn_start.setFixedWidth(130)
-        self.btn_start.setEnabled(False)   # ← desabilitado até preload terminar
+        # Habilitado por default — será desabilitado só durante operação
+        self.btn_start.setEnabled(True)
 
-        self.btn_stop = QPushButton("■  PARAR")
+        self.btn_stop = QPushButton("\u25a0  PARAR")
         self.btn_stop.setObjectName("btn_stop")
         self.btn_stop.setFixedWidth(130)
         self.btn_stop.setEnabled(False)
@@ -179,11 +180,13 @@ class HeaderBar(QFrame):
 
     async def _on_balance(self, _e: str, data: dict):
         bal = data.get("balance", 0.0)
-        self.lbl_balance["value_lbl"].setText(f"$ {bal:.2f}")
-        self.lbl_conn["value_lbl"].setText("⬤ LIVE")
-        self.lbl_conn["value_lbl"].setStyleSheet(
-            "color: #00ff88; font-size: 15px; font-weight: 900;"
-        )
+        def _update():
+            self.lbl_balance["value_lbl"].setText(f"$ {bal:.2f}")
+            self.lbl_conn["value_lbl"].setText("\u2b24 LIVE")
+            self.lbl_conn["value_lbl"].setStyleSheet(
+                "color: #00ff88; font-size: 15px; font-weight: 900;"
+            )
+        QTimer.singleShot(0, _update)
 
     def set_trading_stats(self, wins: int, total: int, pnl: float):
         wr = wins / total * 100 if total > 0 else 0.0
@@ -195,15 +198,19 @@ class HeaderBar(QFrame):
         )
         self.lbl_pnl["value_lbl"].setText(f"$ {pnl:+.2f}")
 
+    def enable_start(self):
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
 
 # ── Main Window ────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     """
-    A janela não inicia o backend.
-    O backend já roda via main.py desde o launch.
-    O botão INICIAR apenas emite Events.SYSTEM_START.
-    O botão PARAR emite Events.SYSTEM_STOP.
+    A janela nao inicia o backend.
+    O backend ja roda via main.py desde o launch.
+    O botao INICIAR apenas emite Events.SYSTEM_START.
+    O botao PARAR emite Events.SYSTEM_STOP.
     """
 
     def __init__(self, parent=None):
@@ -212,13 +219,17 @@ class MainWindow(QMainWindow):
         self._pnl  = 0.0
         self._trading = False
 
-        self.setWindowTitle("NEXUS QUANTUM ULTRA — AI Trading System")
+        self.setWindowTitle("NEXUS QUANTUM ULTRA \u2014 AI Trading System")
         self.setMinimumSize(1400, 900)
         self.resize(1600, 960)
 
         self._setup_ui()
         self._connect_buttons()
         self._subscribe_events()
+
+        # Verifica apos 3s se preload ja terminou (caso evento tenha sido
+        # emitido antes da GUI estar pronta para receber)
+        QTimer.singleShot(3000, self._check_preload_already_done)
 
     # ── UI Setup ───────────────────────────────────────────────────────────
 
@@ -232,13 +243,13 @@ class MainWindow(QMainWindow):
         self.header = HeaderBar()
         root.addWidget(self.header)
 
-        # Preload bar — visível apenas durante preload inicial
+        # Preload bar
         self.preload_bar = QProgressBar()
         self.preload_bar.setRange(0, 100)
         self.preload_bar.setValue(0)
         self.preload_bar.setFormat("Carregando histórico... %p%")
         self.preload_bar.setFixedHeight(22)
-        self.preload_bar.show()   # visível desde o início pois preload roda no boot
+        self.preload_bar.show()
         root.addWidget(self.preload_bar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -247,15 +258,15 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.setMinimumWidth(900)
 
-        self.chart_panel  = ChartPanel()
-        self.agents_panel = AgentsPanel()
+        self.chart_panel   = ChartPanel()
+        self.agents_panel  = AgentsPanel()
         self.council_panel = CouncilPanel()
-        self.trades_table = TradesTable()
+        self.trades_table  = TradesTable()
 
-        tabs.addTab(self.chart_panel,   "📈  Gráfico")
-        tabs.addTab(self.agents_panel,  "🤖  Agentes")
-        tabs.addTab(self.council_panel, "⚖️  Conselho Groq")
-        tabs.addTab(self.trades_table,  "📋  Trades")
+        tabs.addTab(self.chart_panel,   "\U0001f4c8  Gráfico")
+        tabs.addTab(self.agents_panel,  "\U0001f916  Agentes")
+        tabs.addTab(self.council_panel, "\u2696\ufe0f  Conselho Groq")
+        tabs.addTab(self.trades_table,  "\U0001f4cb  Trades")
 
         splitter.addWidget(tabs)
 
@@ -269,7 +280,7 @@ class MainWindow(QMainWindow):
         self.risk_panel = RiskPanel()
         right_lay.addWidget(self.risk_panel, 55)
 
-        log_grp = QGroupBox("📟  LOG DO SISTEMA")
+        log_grp = QGroupBox("\U0001f4df  LOG DO SISTEMA")
         log_lay = QVBoxLayout(log_grp)
         log_lay.setContentsMargins(4, 4, 4, 4)
         self.log_panel = LogPanel()
@@ -282,7 +293,7 @@ class MainWindow(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("NEXUS QUANTUM ULTRA  ·  Inicializando...")
+        self.status_bar.showMessage("NEXUS QUANTUM ULTRA  \u00b7  Inicializando...")
 
     def _connect_buttons(self):
         self.header.btn_start.clicked.connect(self._on_start_clicked)
@@ -295,18 +306,33 @@ class MainWindow(QMainWindow):
         BUS.subscribe(Events.SYSTEM_STOP,  self._on_system_stop)
         BUS.subscribe(Events.AGENT_STATUS, self._on_agent_status)
 
+    def _check_preload_already_done(self):
+        """Se o preload ja terminou antes da GUI estar pronta, libera o botao."""
+        # Se a barra ainda estiver visivel e em 0%, o preload foi pulado
+        # (todas as series skip) ou terminou sem a GUI receber o evento.
+        # Libera o botao de qualquer forma.
+        if self.preload_bar.value() == 0 or self.preload_bar.value() == 100:
+            self._release_start_button("Pronto \u2014 clique em INICIAR para operar")
+
+    def _release_start_button(self, msg: str = ""):
+        self.preload_bar.setValue(100)
+        self.preload_bar.hide()
+        self.header.btn_start.setEnabled(True)
+        self.header.btn_stop.setEnabled(False)
+        if msg:
+            self.status_bar.showMessage(msg)
+
     # ── Button Handlers ────────────────────────────────────────────────────
 
     def _on_start_clicked(self):
-        """Apenas emite sinal — NÃO reinicia backend nem preload."""
+        """Apenas emite sinal — NAO reinicia backend nem preload."""
         if self._trading:
             return
         self._trading = True
         self.header.btn_start.setEnabled(False)
         self.header.btn_stop.setEnabled(True)
-        self.status_bar.showMessage("▶ Operação iniciada — agentes ativos")
+        self.status_bar.showMessage("\u25b6 Operação iniciada \u2014 agentes ativos")
 
-        # Sinaliza agentes para começar a operar
         asyncio.ensure_future(
             BUS.emit(Events.SYSTEM_START, {"mode": "auto"})
         )
@@ -316,7 +342,7 @@ class MainWindow(QMainWindow):
         self._trading = False
         self.header.btn_start.setEnabled(True)
         self.header.btn_stop.setEnabled(False)
-        self.status_bar.showMessage("■ Operação pausada")
+        self.status_bar.showMessage("\u25a0 Operação pausada")
 
         asyncio.ensure_future(
             BUS.emit(Events.SYSTEM_STOP, {"reason": "user_stop", "restart": False})
@@ -326,23 +352,20 @@ class MainWindow(QMainWindow):
 
     async def _on_preload_progress(self, _e: str, data: dict):
         pct = int(data.get("progress", 0))
-        self.preload_bar.setValue(pct)
-        self.status_bar.showMessage(
-            f"Pré-carregando: {data.get('symbol', '')} "
-            f"[{data.get('completed', 0)}/{data.get('total', 0)}]"
-            f"  —  {data.get('candles', 0):,} velas"
-        )
+        def _update():
+            self.preload_bar.setValue(pct)
+            self.status_bar.showMessage(
+                f"Pr\u00e9-carregando: {data.get('symbol', '')} "
+                f"[{data.get('completed', 0)}/{data.get('total', 0)}]"
+                f"  \u2014  {data.get('candles', 0):,} velas"
+            )
+        QTimer.singleShot(0, _update)
 
     async def _on_preload_done(self, _e: str, data: dict):
-        """Preload terminou — esconde barra e libera botão INICIAR."""
-        self.preload_bar.setValue(100)
-        self.preload_bar.hide()
+        """Preload terminou — libera botao INICIAR via QTimer (thread-safe)."""
         total = data.get("total_candles", 0)
-        self.status_bar.showMessage(
-            f"✅ {total:,} velas carregadas  ·  Clique em INICIAR para operar"
-        )
-        # ← LIBERA o botão apenas após preload concluir
-        self.header.btn_start.setEnabled(True)
+        msg   = f"\u2705 {total:,} velas carregadas  \u00b7  Clique em INICIAR para operar"
+        QTimer.singleShot(0, lambda: self._release_start_button(msg))
 
     async def _on_trade_close(self, _e: str, data: dict):
         outcome = data.get("outcome", "")
@@ -353,19 +376,25 @@ class MainWindow(QMainWindow):
         else:
             self._losses += 1
         total = self._wins + self._losses
-        self.header.set_trading_stats(self._wins, total, self._pnl)
+        def _update():
+            self.header.set_trading_stats(self._wins, total, self._pnl)
+        QTimer.singleShot(0, _update)
 
     async def _on_system_stop(self, _e: str, data: dict):
         if data.get("restart", True):
-            return   # reconexão automática — não altera UI
+            return
         reason = data.get("reason", "unknown")
         self._trading = False
-        self.header.btn_start.setEnabled(True)
-        self.header.btn_stop.setEnabled(False)
-        self.status_bar.showMessage(f"⛔ Parado — {reason}")
+        def _update():
+            self.header.btn_start.setEnabled(True)
+            self.header.btn_stop.setEnabled(False)
+            self.status_bar.showMessage(f"\u26d4 Parado \u2014 {reason}")
+        QTimer.singleShot(0, _update)
 
     async def _on_agent_status(self, _e: str, data: dict):
         agent  = data.get("agent",  "")
         status = data.get("status", "")
         if agent == "DERIV" and status == "running":
-            self.status_bar.showMessage("🔗 Deriv conectado — aguardando preload...")
+            def _update():
+                self.status_bar.showMessage("\U0001f517 Deriv conectado \u2014 aguardando preload...")
+            QTimer.singleShot(0, _update)

@@ -1,0 +1,22 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.14",
+  "pythonPlatform": "Windows",
+  "include": [
+    "agents",
+    "core",
+    "council",
+    "database",
+    "gui",
+    "neural",
+    "utils"
+  ],
+  "exclude": [
+    ".venv",
+    "__pycache__",
+    "data",
+    "models"
+  ],
+  "typeCheckingMode": "off"
+}

@@ -351,4 +351,4 @@ async def get_candle_count(symbol: str, granularity: int) -> int:
             select(func.count(Candle.id))
             .where(Candle.symbol == symbol, Candle.granularity == granularity)
         )
-        return int(result.scalar_one() or 0)
+        return result.scalar_one() or 0

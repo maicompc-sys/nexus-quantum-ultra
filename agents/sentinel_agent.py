@@ -65,7 +65,7 @@ class SentinelAgent:
                 self.NAME,
                 f"{symbol} regime: {old_regime} -> {regime} | "
                 f"ATR={current_atr:.5f} | RSI={current_rsi:.1f} | "
-                f"{'✓ LIBERADO' if allowed else '✗ BLOQUEADO'}"
+                f"{'[OK] LIBERADO' if allowed else '[X] BLOQUEADO'}"
             )
 
         await BUS.emit(Events.AGENT_SIGNAL, {

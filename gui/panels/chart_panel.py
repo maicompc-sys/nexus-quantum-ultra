@@ -3,22 +3,21 @@ NEXUS QUANTUM ULTRA — Chart Panel
 Live candlestick chart with indicator overlays using pyqtgraph.
 """
 
-import time
+import asyncio
 import numpy as np
-from collections import deque
 from typing import List, Dict
 
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QPushButton
+    QLabel, QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPainter, QColor
 
-from core.event_bus import BUS, Events
-from database.repository import get_candles
-from utils.indicators import ema, rsi, bollinger_bands
+from core.event_bus       import BUS, Events
+from database.repository  import get_candles
+from utils.indicators     import ema, rsi, bollinger_bands
 
 
 pg.setConfigOptions(antialias=True, background="#060912", foreground="#4a6a9a")
@@ -34,8 +33,6 @@ class CandlestickItem(pg.GraphicsObject):
     def generatePicture(self):
         self.picture = pg.QtGui.QPicture()
         p = QPainter(self.picture)
-        p.setPen(pg.mkPen("w", width=0.5))
-
         w = 0.3
         for d in self.data:
             o, h, l, c = d["open"], d["high"], d["low"], d["close"]
@@ -45,7 +42,6 @@ class CandlestickItem(pg.GraphicsObject):
             p.setBrush(pg.mkBrush(color))
             p.drawLine(pg.QtCore.QPointF(x, l), pg.QtCore.QPointF(x, h))
             p.drawRect(pg.QtCore.QRectF(x - w, min(o, c), w * 2, abs(c - o) or 0.0001))
-
         p.end()
 
     def paint(self, p, *args):
@@ -72,7 +68,6 @@ class ChartPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        # ── Controls ───────────────────────────────────────────────────────
         ctrl = QHBoxLayout()
 
         self.cmb_symbol = QComboBox()
@@ -84,14 +79,14 @@ class ChartPanel(QWidget):
         self.cmb_symbol.currentTextChanged.connect(self._on_symbol_change)
 
         self.cmb_gran = QComboBox()
-        self.cmb_gran.addItems(["1m","5m","15m","1h"])
+        self.cmb_gran.addItems(["1m", "5m", "15m", "1h"])
         self.cmb_gran.currentIndexChanged.connect(self._on_gran_change)
 
-        self.lbl_price = QLabel("──────")
+        self.lbl_price = QLabel("\u2500\u2500\u2500\u2500\u2500\u2500")
         self.lbl_price.setObjectName("lbl_value_blue")
         self.lbl_price.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        ctrl.addWidget(QLabel("Símbolo:"))
+        ctrl.addWidget(QLabel("S\u00edmbolo:"))
         ctrl.addWidget(self.cmb_symbol)
         ctrl.addSpacing(12)
         ctrl.addWidget(QLabel("Granularidade:"))
@@ -100,24 +95,20 @@ class ChartPanel(QWidget):
         ctrl.addWidget(self.lbl_price)
         layout.addLayout(ctrl)
 
-        # ── Chart Layout ───────────────────────────────────────────────────
         self.plot_widget = pg.GraphicsLayoutWidget()
         layout.addWidget(self.plot_widget)
 
-        # Main price plot
         self.price_plot = self.plot_widget.addPlot(row=0, col=0)
-        self.price_plot.setLabel("left", "Preço")
+        self.price_plot.setLabel("left", "Pre\u00e7o")
         self.price_plot.showGrid(x=True, y=True, alpha=0.15)
         self.price_plot.setMouseEnabled(x=True, y=True)
 
-        # RSI plot
         self.rsi_plot = self.plot_widget.addPlot(row=1, col=0)
         self.rsi_plot.setLabel("left", "RSI")
         self.rsi_plot.setMaximumHeight(100)
         self.rsi_plot.showGrid(x=True, y=True, alpha=0.15)
         self.rsi_plot.setXLink(self.price_plot)
 
-        # RSI reference lines
         self.rsi_plot.addItem(pg.InfiniteLine(70, angle=0, pen=pg.mkPen("#ff4444", width=0.8, style=Qt.PenStyle.DashLine)))
         self.rsi_plot.addItem(pg.InfiniteLine(30, angle=0, pen=pg.mkPen("#00ff88", width=0.8, style=Qt.PenStyle.DashLine)))
         self.rsi_plot.addItem(pg.InfiniteLine(50, angle=0, pen=pg.mkPen("#4a6a9a", width=0.5, style=Qt.PenStyle.DotLine)))
@@ -126,13 +117,18 @@ class ChartPanel(QWidget):
         self.plot_widget.ci.layout.setRowStretchFactor(1, 1)
 
     def _setup_bus(self):
-        BUS.subscribe(Events.TICK, self._on_tick)
+        BUS.subscribe(Events.TICK,        self._on_tick)
         BUS.subscribe(Events.PRELOAD_ALL, lambda *_: self._load_candles())
+        BUS.subscribe(Events.CANDLE,      self._on_candle)
 
     def _on_tick(self, _event: str, data: dict):
         if data.get("symbol") == self._symbol:
             price = data.get("price", 0)
-            self.lbl_price.setText(f"  {price:.5f}  ")
+            QTimer.singleShot(0, lambda: self.lbl_price.setText(f"  {price:.5f}  "))
+
+    def _on_candle(self, _event: str, data: dict):
+        if data.get("symbol") == self._symbol and data.get("gran", 60) == self._granularity:
+            self._load_candles()
 
     def _on_symbol_change(self, symbol: str):
         self._symbol = symbol
@@ -143,7 +139,6 @@ class ChartPanel(QWidget):
         self._load_candles()
 
     def _load_candles(self):
-        import asyncio
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -152,57 +147,63 @@ class ChartPanel(QWidget):
             pass
 
     async def _async_load(self):
-        candles = await get_candles(self._symbol, self._granularity, limit=200)
-        if candles:
-            self._candles = candles
-            self._draw()
+        try:
+            candles = await get_candles(self._symbol, self._granularity, limit=200)
+            if candles:
+                self._candles = candles
+                QTimer.singleShot(0, self._draw)
+        except Exception as e:
+            pass
 
     def _draw(self):
         if not self._candles:
             return
 
-        self.price_plot.clear()
-        self.rsi_plot.clear()
+        try:
+            self.price_plot.clear()
+            self.rsi_plot.clear()
 
-        candles = self._candles[-150:]
+            candles = self._candles[-150:]
 
-        # ── Candlesticks ───────────────────────────────────────────────────
-        item = CandlestickItem(candles)
-        self.price_plot.addItem(item)
+            closes = np.array([float(c["close"]) for c in candles], dtype=np.float64)
+            epochs = np.array([float(c["epoch"]) for c in candles], dtype=np.float64)
 
-        closes  = np.array([c["close"] for c in candles], dtype=float)
-        epochs  = np.array([c["epoch"] for c in candles], dtype=float)
+            # Candlesticks
+            item = CandlestickItem(candles)
+            self.price_plot.addItem(item)
 
-        # ── EMA overlays ───────────────────────────────────────────────────
-        if len(closes) > 21:
-            e9  = ema(closes, 9)
-            e21 = ema(closes, 21)
-            self.price_plot.plot(epochs, e9,  pen=pg.mkPen("#FFD700", width=1.2), name="EMA9")
-            self.price_plot.plot(epochs, e21, pen=pg.mkPen("#FF69B4", width=1.2), name="EMA21")
+            # EMA overlays
+            if len(closes) > 21:
+                e9  = ema(closes, 9)
+                e21 = ema(closes, 21)
+                self.price_plot.plot(epochs, e9,  pen=pg.mkPen("#FFD700", width=1.2), name="EMA9")
+                self.price_plot.plot(epochs, e21, pen=pg.mkPen("#FF69B4", width=1.2), name="EMA21")
 
-        # ── Bollinger Bands ────────────────────────────────────────────────
-        if len(closes) > 20:
-            bb = bollinger_bands(closes)
-            self.price_plot.plot(epochs, bb["upper"], pen=pg.mkPen("#2a4a8a", width=0.8))
-            self.price_plot.plot(epochs, bb["lower"], pen=pg.mkPen("#2a4a8a", width=0.8))
-            fill = pg.FillBetweenItem(
-                self.price_plot.plot(epochs, bb["upper"]),
-                self.price_plot.plot(epochs, bb["lower"]),
-                brush=pg.mkBrush(QColor(42, 74, 138, 25))
-            )
-            self.price_plot.addItem(fill)
+            # Bollinger Bands — bollinger_bands() retorna TUPLA (upper, mid, lower)
+            if len(closes) > 20:
+                bb_upper, bb_mid, bb_lower = bollinger_bands(closes)
+                p_upper = self.price_plot.plot(epochs, bb_upper, pen=pg.mkPen("#2a4a8a", width=0.8))
+                p_lower = self.price_plot.plot(epochs, bb_lower, pen=pg.mkPen("#2a4a8a", width=0.8))
+                fill = pg.FillBetweenItem(
+                    p_upper, p_lower,
+                    brush=pg.mkBrush(QColor(42, 74, 138, 25))
+                )
+                self.price_plot.addItem(fill)
 
-        # ── RSI ────────────────────────────────────────────────────────────
-        if len(closes) > 15:
-            rsi_vals = rsi(closes)
-            valid    = ~np.isnan(rsi_vals)
-            self.rsi_plot.addItem(
-                pg.InfiniteLine(70, angle=0, pen=pg.mkPen("#ff4444", width=0.8, style=Qt.PenStyle.DashLine))
-            )
-            self.rsi_plot.addItem(
-                pg.InfiniteLine(30, angle=0, pen=pg.mkPen("#00ff88", width=0.8, style=Qt.PenStyle.DashLine))
-            )
-            self.rsi_plot.plot(
-                epochs[valid], rsi_vals[valid],
-                pen=pg.mkPen("#a78bfa", width=1.5)
-            )
+            # RSI
+            if len(closes) > 15:
+                rsi_vals = rsi(closes)
+                valid    = ~np.isnan(rsi_vals)
+                self.rsi_plot.addItem(
+                    pg.InfiniteLine(70, angle=0, pen=pg.mkPen("#ff4444", width=0.8, style=Qt.PenStyle.DashLine))
+                )
+                self.rsi_plot.addItem(
+                    pg.InfiniteLine(30, angle=0, pen=pg.mkPen("#00ff88", width=0.8, style=Qt.PenStyle.DashLine))
+                )
+                self.rsi_plot.plot(
+                    epochs[valid], rsi_vals[valid],
+                    pen=pg.mkPen("#a78bfa", width=1.5)
+                )
+
+        except Exception as e:
+            pass

@@ -1,7 +1,7 @@
 """
 NEXUS QUANTUM ULTRA — Quant Agent
-Calcula indicadores e gera sinais para todos os símbolos.
-Recarrega velas após preload concluído.
+Calcula indicadores e gera sinais para todos os simbolos.
+Recarrega velas apos preload concluido.
 """
 
 import asyncio
@@ -20,52 +20,46 @@ from utils.indicators    import ema, rsi, bollinger_bands, atr
 from utils.logger        import agent_log
 
 
-MIN_CANDLES   = 50      # mínimo para análise
-PRIMARY_GRAN  = 60      # granularidade principal (1m)
-ANALYSIS_GRAN = 300     # granularidade secundária (5m)
+MIN_CANDLES   = 50
+PRIMARY_GRAN  = 60
+ANALYSIS_GRAN = 300
 
 
 class QuantAgent:
 
     def __init__(self):
-        self._running    = False
-        self._candles:   Dict[str, Dict[int, List[Dict]]] = {}
-        self._signals:   Dict[str, Dict]                  = {}
-        self._loaded     = False
+        self._running  = False
+        self._candles: Dict[str, Dict[int, List[Dict]]] = {}
+        self._signals: Dict[str, Dict]                  = {}
+        self._loaded   = False
 
     async def run(self) -> None:
         self._running = True
         agent_log("QUANT", "Quant Agent iniciado.")
 
-        # ── Subscriptions ─────────────────────────────────────────────
-        await BUS.subscribe(Events.CANDLE,      self._on_candle)
-        await BUS.subscribe(Events.PRELOAD_ALL, self._on_preload_done)
-        await BUS.subscribe("system.agents_ready", self._on_agents_ready)
+        # BUS.subscribe e sincrono - nao usar await
+        BUS.subscribe(Events.CANDLE,          self._on_candle)
+        BUS.subscribe(Events.PRELOAD_ALL,     self._on_preload_done)
+        BUS.subscribe("system.agents_ready",  self._on_agents_ready)
 
-        # ── Tenta carregar do DB imediatamente ────────────────────────
         await self._load_all_candles()
 
-        # ── Loop de análise periódica ─────────────────────────────────
         while self._running:
             await asyncio.sleep(ANALYSIS_INTERVAL)
             if self._loaded:
                 await self._analyze_all()
 
-    # ── Event Handlers ─────────────────────────────────────────────────
-
-    async def _on_preload_done(self, data: Dict) -> None:
+    async def _on_preload_done(self, _event: str, data: Dict) -> None:
         total = data.get("total_candles", 0)
-        agent_log("QUANT", f"Preload concluído: {total:,} velas — recarregando...")
+        agent_log("QUANT", f"Preload concluido: {total:,} velas - recarregando...")
         await self._load_all_candles()
         await self._analyze_all()
 
-    async def _on_agents_ready(self, data: Dict) -> None:
-        """Recarrega quando sistema está 100% pronto."""
+    async def _on_agents_ready(self, _event: str, data: Dict) -> None:
         if not self._loaded:
             await self._load_all_candles()
 
-    async def _on_candle(self, data: Dict) -> None:
-        """Atualiza última vela em tempo real."""
+    async def _on_candle(self, _event: str, data: Dict) -> None:
         symbol = data.get("symbol")
         gran   = data.get("gran", PRIMARY_GRAN)
 
@@ -76,15 +70,13 @@ class QuantAgent:
 
         candle = {
             "epoch": data.get("epoch", 0),
-            "open":  data.get("open",  0.0),
-            "high":  data.get("high",  0.0),
-            "low":   data.get("low",   0.0),
-            "close": data.get("close", 0.0),
+            "open":  float(data.get("open",  0.0)),
+            "high":  float(data.get("high",  0.0)),
+            "low":   float(data.get("low",   0.0)),
+            "close": float(data.get("close", 0.0)),
         }
 
         candles = self._candles[symbol][gran]
-
-        # Atualiza última ou adiciona
         if candles and candles[-1]["epoch"] == candle["epoch"]:
             candles[-1] = candle
         else:
@@ -92,24 +84,31 @@ class QuantAgent:
             if len(candles) > 10000:
                 candles.pop(0)
 
-    # ── Data Loading ────────────────────────────────────────────────────
-
     async def _load_all_candles(self) -> None:
         loaded = 0
         for symbol in SYMBOLS:
             self._candles[symbol] = {}
             for gran in PRELOAD_GRANULARITIES:
-                candles = await get_candles(symbol, gran, limit=2000)
-                self._candles[symbol][gran] = candles or []
-                loaded += len(self._candles[symbol][gran])
+                raw = await get_candles(symbol, gran, limit=2000)
+                # Garante que todos os valores sao float puro (nao Decimal do SQLite)
+                candles = [
+                    {
+                        "epoch": int(c["epoch"]),
+                        "open":  float(c["open"]),
+                        "high":  float(c["high"]),
+                        "low":   float(c["low"]),
+                        "close": float(c["close"]),
+                    }
+                    for c in (raw or [])
+                ]
+                self._candles[symbol][gran] = candles
+                loaded += len(candles)
 
         if loaded > 0:
             self._loaded = True
             agent_log("QUANT", f"[OK] {loaded:,} velas carregadas do DB")
         else:
-            agent_log("QUANT", "⚠️ DB vazio — aguardando preload", logging.WARNING)
-
-    # ── Analysis ────────────────────────────────────────────────────────
+            agent_log("QUANT", "[AVISO] DB vazio - aguardando preload", logging.WARNING)
 
     async def _analyze_all(self) -> None:
         for symbol in SYMBOLS:
@@ -119,7 +118,7 @@ class QuantAgent:
                     self._signals[symbol] = signal
                     await BUS.emit(Events.AGENT_SIGNAL, signal)
             except Exception as e:
-                agent_log("QUANT", f"Erro análise {symbol}: {e}", logging.ERROR)
+                agent_log("QUANT", f"Erro analise {symbol}: {e}", logging.ERROR)
 
     async def _analyze_symbol(self, symbol: str) -> Optional[Dict]:
         candles_1m = self._candles.get(symbol, {}).get(PRIMARY_GRAN, [])
@@ -129,59 +128,51 @@ class QuantAgent:
             agent_log("QUANT", f"Velas insuficientes para {symbol}: {len(candles_1m)}")
             return None
 
-        closes_1m = np.array([c["close"] for c in candles_1m], dtype=float)
-        closes_5m = np.array([c["close"] for c in candles_5m], dtype=float) if len(candles_5m) >= 20 else closes_1m
-        highs_1m  = np.array([c["high"]  for c in candles_1m], dtype=float)
-        lows_1m   = np.array([c["low"]   for c in candles_1m], dtype=float)
+        closes_1m = np.array([c["close"] for c in candles_1m], dtype=np.float64)
+        closes_5m = np.array([c["close"] for c in candles_5m], dtype=np.float64) if len(candles_5m) >= 20 else closes_1m
+        highs_1m  = np.array([c["high"]  for c in candles_1m], dtype=np.float64)
+        lows_1m   = np.array([c["low"]   for c in candles_1m], dtype=np.float64)
 
-        # ── Indicadores ─────────────────────────────────────────────
-        ema_fast  = ema(closes_1m, 9)
-        ema_slow  = ema(closes_1m, 21)
-        ema_trend = ema(closes_5m, 50) if len(closes_5m) >= 50 else ema(closes_1m, 50)
-        rsi_val   = rsi(closes_1m, 14)
+        ema_fast              = ema(closes_1m, 9)
+        ema_slow              = ema(closes_1m, 21)
+        ema_trend             = ema(closes_5m, 50) if len(closes_5m) >= 50 else ema(closes_1m, 50)
+        rsi_val               = rsi(closes_1m, 14)
         bb_upper, bb_mid, bb_lower = bollinger_bands(closes_1m, 20, 2.0)
-        atr_val   = atr(highs_1m, lows_1m, closes_1m, 14)
+        atr_val               = atr(highs_1m, lows_1m, closes_1m, 14)
 
-        current_price = closes_1m[-1]
-        atr_norm      = atr_val[-1] / current_price if current_price > 0 else 0
+        current_price = float(closes_1m[-1])
+        atr_norm      = float(atr_val[-1]) / current_price if current_price > 0 else 0.0
 
-        # ── Pontuação de sinal ───────────────────────────────────────
         score_call = 0.0
         score_put  = 0.0
 
-        # EMA cross
         if ema_fast[-1] > ema_slow[-1]:
             score_call += 0.20
         else:
             score_put  += 0.20
 
-        # EMA cross confirmação
         if ema_fast[-2] <= ema_slow[-2] and ema_fast[-1] > ema_slow[-1]:
-            score_call += 0.15   # crossover recente
+            score_call += 0.15
         elif ema_fast[-2] >= ema_slow[-2] and ema_fast[-1] < ema_slow[-1]:
             score_put  += 0.15
 
-        # Tendência macro
         if current_price > ema_trend[-1]:
             score_call += 0.10
         else:
             score_put  += 0.10
 
-        # RSI
-        if rsi_val[-1] < 35:
-            score_call += 0.20   # oversold
-        elif rsi_val[-1] > 65:
-            score_put  += 0.20   # overbought
-        elif 45 <= rsi_val[-1] <= 55:
-            pass                 # neutro — não pontua
-        elif rsi_val[-1] < 50:
+        rsi_last = float(rsi_val[-1]) if not np.isnan(rsi_val[-1]) else 50.0
+        if rsi_last < 35:
+            score_call += 0.20
+        elif rsi_last > 65:
+            score_put  += 0.20
+        elif rsi_last < 50:
             score_call += 0.05
         else:
             score_put  += 0.05
 
-        # Bollinger Bands
         if current_price < bb_lower[-1]:
-            score_call += 0.20   # abaixo da banda
+            score_call += 0.20
         elif current_price > bb_upper[-1]:
             score_put  += 0.20
         elif current_price > bb_mid[-1]:
@@ -189,7 +180,6 @@ class QuantAgent:
         else:
             score_put  += 0.05
 
-        # Momentum (últimas 3 velas)
         if len(closes_1m) >= 4:
             recent = closes_1m[-4:]
             if recent[-1] > recent[0]:
@@ -197,36 +187,34 @@ class QuantAgent:
             else:
                 score_put  += 0.10
 
-        # Volatilidade penaliza em extremos
         if atr_norm > 0.005:
             score_call *= 0.85
             score_put  *= 0.85
 
-        # ── Decisão ─────────────────────────────────────────────────
         if score_call > score_put:
-            direction   = "CALL"
-            confidence  = min(score_call, 0.95)
+            direction  = "CALL"
+            confidence = min(score_call, 0.95)
         else:
-            direction   = "PUT"
-            confidence  = min(score_put, 0.95)
+            direction  = "PUT"
+            confidence = min(score_put, 0.95)
 
         return {
-            "symbol":      symbol,
-            "direction":   direction,
-            "confidence":  round(confidence, 4),
-            "price":       current_price,
-            "rsi":         round(float(rsi_val[-1]), 2),
-            "ema_fast":    round(float(ema_fast[-1]), 5),
-            "ema_slow":    round(float(ema_slow[-1]), 5),
-            "bb_upper":    round(float(bb_upper[-1]), 5),
-            "bb_lower":    round(float(bb_lower[-1]), 5),
-            "atr":         round(float(atr_val[-1]),  5),
-            "score_call":  round(score_call, 4),
-            "score_put":   round(score_put,  4),
+            "agent":        "QUANT",
+            "symbol":       symbol,
+            "signal":       direction,
+            "direction":    direction,
+            "confidence":   round(confidence, 4),
+            "price":        current_price,
+            "rsi":          round(rsi_last, 2),
+            "ema_fast":     round(float(ema_fast[-1]), 5),
+            "ema_slow":     round(float(ema_slow[-1]), 5),
+            "bb_upper":     round(float(bb_upper[-1]), 5),
+            "bb_lower":     round(float(bb_lower[-1]), 5),
+            "atr":          round(float(atr_val[-1]),  5),
+            "score_call":   round(score_call, 4),
+            "score_put":    round(score_put,  4),
             "candles_used": len(candles_1m),
         }
-
-    # ── Public API ──────────────────────────────────────────────────────
 
     def get_signal(self, symbol: str) -> Optional[Dict]:
         return self._signals.get(symbol)
@@ -242,31 +230,25 @@ class QuantAgent:
         agent_log("QUANT", "Quant Agent parado.")
 
     def get_context(self, symbol: str) -> Optional[Dict]:
-        """
-        Retorna contexto completo do símbolo para o StrategyAgent.
-        Inclui sinal + indicadores + velas recentes.
-        """
         signal = self._signals.get(symbol)
         if not signal:
             return None
-
         candles_1m = self._candles.get(symbol, {}).get(PRIMARY_GRAN, [])
-
         return {
-            "symbol":       symbol,
-            "signal":       signal,
-            "direction":    signal.get("direction"),
-            "confidence":   signal.get("confidence", 0.0),
-            "rsi":          signal.get("rsi", 50.0),
-            "ema_fast":     signal.get("ema_fast", 0.0),
-            "ema_slow":     signal.get("ema_slow", 0.0),
-            "bb_upper":     signal.get("bb_upper", 0.0),
-            "bb_lower":     signal.get("bb_lower", 0.0),
-            "atr":          signal.get("atr", 0.0),
-            "price":        signal.get("price", 0.0),
-            "score_call":   signal.get("score_call", 0.0),
-            "score_put":    signal.get("score_put",  0.0),
-            "candles":      candles_1m[-50:] if candles_1m else [],
+            "symbol":        symbol,
+            "signal":        signal,
+            "direction":     signal.get("direction"),
+            "confidence":    signal.get("confidence", 0.0),
+            "rsi":           signal.get("rsi", 50.0),
+            "ema_fast":      signal.get("ema_fast", 0.0),
+            "ema_slow":      signal.get("ema_slow", 0.0),
+            "bb_upper":      signal.get("bb_upper", 0.0),
+            "bb_lower":      signal.get("bb_lower", 0.0),
+            "atr":           signal.get("atr", 0.0),
+            "price":         signal.get("price", 0.0),
+            "score_call":    signal.get("score_call", 0.0),
+            "score_put":     signal.get("score_put",  0.0),
+            "candles":       candles_1m[-50:] if candles_1m else [],
             "candles_count": len(candles_1m),
-            "is_loaded":    self._loaded,
+            "is_loaded":     self._loaded,
         }

@@ -145,7 +145,8 @@ async def get_trade_stats(symbol: Optional[str] = None) -> Dict:
         wins_q = select(func.count(Trade.id)).where(Trade.outcome == "WIN")
         if symbol:
             wins_q = wins_q.where(Trade.symbol == symbol)
-        wins = int((await session.execute(wins_q)).scalar_one() or 0)
+        wins = (await session.execute(wins_q)).scalar_one() or 0
+
 
         total     = int(row.total or 0)
         net_pnl   = float(row.net_profit or 0.0)
@@ -221,10 +222,8 @@ async def update_strategy_stats(name: str, won: bool, profit: float) -> None:
 
         # Auto-block se win_rate < 35% após 20+ trades
         if total_trades >= 20 and win_rate < 35.0:
-            strat.is_blocked   = True         # type: ignore[assignment]
-            strat.block_reason = (            # type: ignore[assignment]
-                f"Win rate abaixo de 35% ({win_rate}%) após {total_trades} trades"
-            )
+            strat.is_blocked   = True  # type: ignore[assignment]
+            strat.block_reason = f"Win rate abaixo de 35% ({win_rate}%) após {total_trades} trades"  # type: ignore[assignment]
             agent_log("AUDITOR", f"Auto-bloqueio: {name} — win_rate={win_rate}%")
 
         await session.commit()

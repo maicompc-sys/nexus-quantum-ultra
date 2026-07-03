@@ -162,7 +162,7 @@ class NeuralTrainer:
             "hyperparams":    {"lr": self._get_lr(), "lookback": NN_LOOKBACK},
         })
 
-        agent_log(self.NAME, f"✅ Treino concluído: v{self._version} acc={best_val_acc:.3f}")
+        agent_log(self.NAME, f"[OK] Treino concluído: v{self._version} acc={best_val_acc:.3f}")
         await BUS.emit(Events.NN_DONE, {"accuracy": best_val_acc, "version": self._version})
 
     def _save_model(self, model: NexusEnsemble) -> None:

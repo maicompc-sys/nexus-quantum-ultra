@@ -102,7 +102,7 @@ class ExecutorAgent:
             await save_trade(trade_data)
 
             await BUS.emit(Events.TRADE_OPEN, self._open_trade)
-            agent_log(self.NAME, f"✅ Trade aberto: {symbol} {direction} | contract={contract_id}")
+            agent_log(self.NAME, f"[OK] Trade aberto: {symbol} {direction} | contract={contract_id}")
 
         except Exception as e:
             agent_log(self.NAME, f"Exceção no executor: {e}", logging.ERROR)
@@ -138,7 +138,7 @@ class ExecutorAgent:
             "indicators":   self._open_trade.get("indicators", {}),
         })
 
-        icon = "✅" if outcome == "WIN" else "❌"
+        icon = "[OK]" if outcome == "WIN" else "[X]"
         agent_log(
             self.NAME,
             f"{icon} {outcome}: {self._open_trade['symbol']} | "

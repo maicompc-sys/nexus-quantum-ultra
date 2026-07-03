@@ -333,8 +333,9 @@ class MainWindow(QMainWindow):
         self.preload_bar.show()
         self.status_bar.showMessage("Iniciando NEXUS QUANTUM ULTRA...")
 
-        self._async_thread = AsyncThread(self._boot_coro)
-        self._async_thread.start()
+        if self._boot_coro:
+            self._async_thread = AsyncThread(self._boot_coro)
+            self._async_thread.start()
 
     def _stop_system(self):
         if self._async_thread and self._async_thread.loop:

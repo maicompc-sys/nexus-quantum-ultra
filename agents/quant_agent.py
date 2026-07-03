@@ -240,3 +240,33 @@ class QuantAgent:
     def stop(self) -> None:
         self._running = False
         agent_log("QUANT", "Quant Agent parado.")
+
+    def get_context(self, symbol: str) -> Optional[Dict]:
+        """
+        Retorna contexto completo do símbolo para o StrategyAgent.
+        Inclui sinal + indicadores + velas recentes.
+        """
+        signal = self._signals.get(symbol)
+        if not signal:
+            return None
+
+        candles_1m = self._candles.get(symbol, {}).get(PRIMARY_GRAN, [])
+
+        return {
+            "symbol":       symbol,
+            "signal":       signal,
+            "direction":    signal.get("direction"),
+            "confidence":   signal.get("confidence", 0.0),
+            "rsi":          signal.get("rsi", 50.0),
+            "ema_fast":     signal.get("ema_fast", 0.0),
+            "ema_slow":     signal.get("ema_slow", 0.0),
+            "bb_upper":     signal.get("bb_upper", 0.0),
+            "bb_lower":     signal.get("bb_lower", 0.0),
+            "atr":          signal.get("atr", 0.0),
+            "price":        signal.get("price", 0.0),
+            "score_call":   signal.get("score_call", 0.0),
+            "score_put":    signal.get("score_put",  0.0),
+            "candles":      candles_1m[-50:] if candles_1m else [],
+            "candles_count": len(candles_1m),
+            "is_loaded":    self._loaded,
+        }

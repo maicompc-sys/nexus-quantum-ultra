@@ -71,7 +71,8 @@ class PreloadSession:
                 ) as resp:
 
                     if resp.status == 200:
-                        data   = await resp.json()
+                        raw_data = await resp.json()
+                        data = raw_data.get("data", raw_data)
                         ws_url = (
                             data.get("url") or
                             data.get("ws_url") or

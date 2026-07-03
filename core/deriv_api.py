@@ -92,29 +92,26 @@ class DerivClient:
                     timeout=aiohttp.ClientTimeout(total=15)
                 ) as resp:
                     if resp.status == 200:
-                        data  = await resp.json()
-                        # Response: {"data": {"url": "wss://..."}, "meta": {...}}
-                        inner = data.get("data", data)
+                        body = await resp.json()
+                        data = body.get("data", body)   # ← igual
+                    
                         ws_url = (
-                            inner.get("url")
-                            or inner.get("ws_url")
-                            or inner.get("websocket_url")
-                            or data.get("url")
+                            data.get("url") or
+                            data.get("ws_url") or
+                            data.get("websocket_url")
                         )
-                        expires = inner.get("expires_at", data.get("expires_at", 0))
-
                         if not ws_url:
-                            otp = inner.get("otp") or inner.get("token")
+                            otp = data.get("otp") or data.get("token")
                             if otp:
                                 base   = WS_DEMO_BASE if account_type == "demo" else WS_REAL_BASE
                                 ws_url = f"{base}?otp={otp}"
-
+                    
                         if ws_url:
-                            self._otp_expires_at = float(expires) if expires else 0.0
-                            agent_log("DERIV", f"OTP obtido | expires_at={expires}")
+                            self._otp_expires_at = float(body.get("meta", {}).get("timing", 0))
+                            agent_log("DERIV", f"OTP obtido | url={ws_url[:60]}...")
                             return ws_url
-
-                        agent_log("DERIV", f"OTP response sem URL: {data}", logging.ERROR)
+                    
+                        agent_log("DERIV", f"OTP response sem URL: {body}", logging.ERROR)
                         return None
 
                     elif resp.status == 401:

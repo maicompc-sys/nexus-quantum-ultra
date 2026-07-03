@@ -322,3 +322,19 @@ async def update_daily_stats() -> None:
                 net_profit   = stats["net_profit"],
             ))
         await session.commit()
+
+
+# ── Aliases de compatibilidade (usados pelo preloader) ─────────────────────
+async def save_candles_batch(candles: List[Dict]) -> int:
+    """Alias de upsert_candles — compatibilidade com preloader.py."""
+    return await upsert_candles(candles)
+
+
+async def get_candle_count(symbol: str, granularity: int) -> int:
+    """Retorna total de velas salvas para um par symbol/granularity."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(func.count(Candle.id))
+            .where(Candle.symbol == symbol, Candle.granularity == granularity)
+        )
+        return result.scalar_one() or 0

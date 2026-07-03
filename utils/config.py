@@ -30,6 +30,11 @@ GROQ_KEYS = [
     ] if k
 ]
 
+# Modelos por agente do conclave (round-robin de chaves)
+GROQ_MODEL_A = os.getenv("GROQ_MODEL_A", "llama-3.3-70b-versatile")   # Estrategista
+GROQ_MODEL_B = os.getenv("GROQ_MODEL_B", "mixtral-8x7b-32768")        # Analista
+GROQ_MODEL_C = os.getenv("GROQ_MODEL_C", "llama-3.1-8b-instant")      # Executor rapido
+
 # ── Risco ───────────────────────────────────────────────────────────────────
 MIN_STAKE        = float(os.getenv("MIN_STAKE",   "0.35"))
 MAX_STAKE        = float(os.getenv("MAX_STAKE",   "50.0"))
@@ -50,6 +55,7 @@ BASE_DIR      = Path(__file__).parent.parent
 MODELS_DIR    = BASE_DIR / "models"
 MEMORY_FILE   = BASE_DIR / "data" / "memory.json"
 DATABASE_URL  = f"sqlite+aiosqlite:///{BASE_DIR}/data/nexus.db"
+DB_URL        = DATABASE_URL   # alias usado por database/repository.py
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 (BASE_DIR / "data").mkdir(parents=True, exist_ok=True)
 

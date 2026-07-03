@@ -101,3 +101,7 @@ class NexusEnsemble(nn.Module):
 
 LABEL_MAP   = {0: "HOLD", 1: "CALL", 2: "PUT"}
 LABEL_INDEX = {"HOLD": 0, "CALL": 1, "PUT": 2}
+
+# Constantes de arquitetura exportadas
+INPUT_SIZE  = 12   # numero de features por timestep (indicadores tecnicos)
+NUM_CLASSES = 3    # HOLD, CALL, PUT

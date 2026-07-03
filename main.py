@@ -31,9 +31,9 @@ from gui.main_window         import MainWindow
 
 
 async def boot() -> None:
-    agent_log("SYSTEM", "═" * 60)
+    agent_log("SYSTEM", "=" * 60)
     agent_log("SYSTEM", "  NEXUS QUANTUM ULTRA — INICIANDO")
-    agent_log("SYSTEM", "═" * 60)
+    agent_log("SYSTEM", "=" * 60)
 
     # 1. Database
     await init_db()
@@ -58,7 +58,7 @@ async def boot() -> None:
     preloader = Preloader()
     await preloader.run(incremental=True)
 
-    agent_log("SYSTEM", "═" * 60)
+    agent_log("SYSTEM", "=" * 60)
     agent_log("SYSTEM", "Iniciando todos os agentes...")
 
     # 4. Launch all agents as async tasks
@@ -78,8 +78,8 @@ async def boot() -> None:
         asyncio.create_task(neural.run(),          name="neural"),
     ]
 
-    agent_log("SYSTEM", f"✅ {len(tasks)} tasks iniciadas.")
-    agent_log("SYSTEM", "═" * 60)
+    agent_log("SYSTEM", f"[OK] {len(tasks)} tasks iniciadas.")
+    agent_log("SYSTEM", "=" * 60)
 
     # 5. Expose agents to GUI via BUS
     await BUS.emit("system.agents_ready", {

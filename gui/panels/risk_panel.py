@@ -170,5 +170,4 @@ class RiskPanel(QWidget):
 
     def _reset_halt(self):
         from core.event_bus import BUS
-        import asyncio
-        asyncio.ensure_future(BUS.emit("risk.reset_halt", {}))
+        BUS.emit_sync("risk.reset_halt", {})

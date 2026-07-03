@@ -23,6 +23,7 @@ class EventBus:
         self._wildcard:    List[Callable]             = []
         self._queue:       asyncio.Queue              = asyncio.Queue(maxsize=10_000)
         self._running:     bool                       = False
+        self._loop = None
 
     def subscribe(self, event: str, handler: Callable) -> None:
         self._subscribers[event].append(handler)
@@ -42,10 +43,8 @@ class EventBus:
     def emit_sync(self, event: str, data: Any = None) -> None:
         """Fire-and-forget from sync context."""
         try:
-            loop = asyncio.get_event_loop()
-            loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(self.emit(event, data))
-            )
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(self.emit(event, data), self._loop)
         except Exception as e:
             agent_log("SYSTEM", f"EventBus emit_sync error: {e}", logging.ERROR)
 
@@ -78,6 +77,7 @@ class EventBus:
     async def run(self) -> None:
         """Main dispatch loop — run as a background task."""
         self._running = True
+        self._loop = asyncio.get_running_loop()
         agent_log("SYSTEM", "EventBus iniciado.")
         while self._running:
             try:

@@ -107,7 +107,15 @@ class DerivClient:
                                 ws_url = f"{base}?otp={otp}"
                     
                         if ws_url:
-                            self._otp_expires_at = float(body.get("meta", {}).get("timing", 0))
+                            # ── expires_at: usa valor real ou define 300s no futuro ──────────
+                            raw_expires = body.get("data", {}).get("expires_at", 0)
+                            if raw_expires and raw_expires > time.time():
+                                # É um timestamp Unix real
+                                self._otp_expires_at = float(raw_expires)
+                            else:
+                                # Deriv não retorna expires_at — OTP dura ~5 min por padrão
+                                self._otp_expires_at = time.time() + 300.0
+
                             agent_log("DERIV", f"OTP obtido | url={ws_url[:60]}...")
                             return ws_url
                     
@@ -163,10 +171,6 @@ class DerivClient:
                     ping_timeout     = 15,
                     close_timeout    = 10,
                     max_size         = 2 ** 21,
-                    additional_headers = {
-                        "Deriv-App-ID": DERIV_APP_ID,
-                        "User-Agent":   "NexusQuantumUltra/2.0",
-                    },
                 )
                 self._ws_url = ws_url
 
@@ -225,18 +229,23 @@ class DerivClient:
                 asyncio.create_task(self.connect(), name="deriv_reconnect")
 
     async def _heartbeat_loop(self) -> None:
+        import time
         while self._running and self._connected:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
-            # Renova OTP antes de expirar
+            # ── Verifica OTP apenas se expires_at foi definido ───────────
             if self._otp_expires_at > 0:
                 remaining = self._otp_expires_at - time.time()
-                if remaining < OTP_REFRESH_MARGIN:
-                    agent_log("DERIV", "OTP expirando — renovando conexao...")
+                agent_log("DERIV", f"OTP remaining: {remaining:.0f}s")   # debug temporário
+
+                if remaining < OTP_REFRESH_MARGIN:  # < 60s
+                    agent_log("DERIV", "OTP expirando — renovando conexão...")
                     if self._ws:
                         await self._ws.close()
                     return
+            # Se expires_at == 0, NUNCA renova por OTP — só renova se WS cair
 
+            # ── Ping normal ───────────────────────────────────────────────
             try:
                 resp = await self._request({"ping": 1}, timeout=8.0)
                 if not resp:

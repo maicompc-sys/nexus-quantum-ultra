@@ -1,12 +1,10 @@
 """
 NEXUS QUANTUM ULTRA — Main Window (PyQt6)
-The most advanced Windows trading interface ever built.
 """
 
 import asyncio
-import sys
 from datetime import datetime
-from typing import Coroutine
+from typing import Optional
 
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
@@ -16,8 +14,8 @@ from PyQt6.QtWidgets import (
     QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QFont, QIcon, QTextCursor, QColor
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont, QTextCursor, QColor
 
 from gui.panels.chart_panel   import ChartPanel
 from gui.panels.agents_panel  import AgentsPanel
@@ -27,23 +25,8 @@ from core.event_bus           import BUS, Events
 from utils.logger             import get_emitter, AGENT_COLORS
 
 
-# ── Async runner thread ────────────────────────────────────────────────────
-class AsyncThread(QThread):
-    started_sig = pyqtSignal()
+# ── Trades Table ───────────────────────────────────────────────────────────
 
-    def __init__(self, coro_fn, parent=None):
-        super().__init__(parent)
-        self.coro_fn = coro_fn
-        self.loop    = None
-
-    def run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.started_sig.emit()
-        self.loop.run_until_complete(self.coro_fn())
-
-
-# ── Trades table ───────────────────────────────────────────────────────────
 class TradesTable(QTableWidget):
     COLS = ["Hora", "Símbolo", "Tipo", "Stake", "Profit", "Resultado", "Conf", "Estratégia"]
 
@@ -58,12 +41,11 @@ class TradesTable(QTableWidget):
         BUS.subscribe(Events.TRADE_CLOSE, self._on_trade)
 
     async def _on_trade(self, _e: str, data: dict):
-        row  = self.rowCount()
+        row = self.rowCount()
         self.insertRow(row)
-        ts   = datetime.now().strftime("%H:%M:%S")
-        out  = data.get("outcome", "")
-        prof = data.get("profit",  0.0)
-
+        ts  = datetime.now().strftime("%H:%M:%S")
+        out = data.get("outcome", "")
+        prof = data.get("profit", 0.0)
         vals = [
             ts,
             data.get("symbol",        "──"),
@@ -84,25 +66,23 @@ class TradesTable(QTableWidget):
             if col in colors:
                 item.setForeground(QColor(colors[col]))
             self.setItem(row, col, item)
-
         self.scrollToBottom()
         if self.rowCount() > 200:
             self.removeRow(0)
 
 
-# ── Log panel ──────────────────────────────────────────────────────────────
+# ── Log Panel ──────────────────────────────────────────────────────────────
+
 class LogPanel(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setFont(QFont("Consolas", 10))
         self.document().setMaximumBlockCount(2000)
-
-        emitter = get_emitter()
-        emitter.new_log.connect(self._append)
+        get_emitter().new_log.connect(self._append)
 
     def _append(self, agent: str, level: str, message: str):
-        color  = AGENT_COLORS.get(agent, "#ffffff")
+        color = AGENT_COLORS.get(agent, "#ffffff")
         lcolors = {
             "ERROR":    "#ff4444",
             "WARNING":  "#ffd700",
@@ -110,9 +90,8 @@ class LogPanel(QTextEdit):
             "INFO":     "#c0cce0",
             "DEBUG":    "#4a6a9a",
         }
-        lc  = lcolors.get(level, "#c0cce0")
-        ts  = datetime.now().strftime("%H:%M:%S")
-
+        lc = lcolors.get(level, "#c0cce0")
+        ts = datetime.now().strftime("%H:%M:%S")
         self.append(
             f'<span style="color:#4a6a9a">[{ts}]</span> '
             f'<span style="color:{color};font-weight:700">[{agent}]</span> '
@@ -123,7 +102,8 @@ class LogPanel(QTextEdit):
         self.setTextCursor(cursor)
 
 
-# ── Header bar ─────────────────────────────────────────────────────────────
+# ── Header Bar ─────────────────────────────────────────────────────────────
+
 class HeaderBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -138,7 +118,6 @@ class HeaderBar(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 8, 20, 8)
 
-        # Logo / title
         title_box = QVBoxLayout()
         lbl_title = QLabel("NEXUS QUANTUM ULTRA")
         lbl_title.setObjectName("lbl_title")
@@ -149,31 +128,25 @@ class HeaderBar(QFrame):
         layout.addLayout(title_box)
         layout.addStretch()
 
-        # Live stats
         stats_box = QHBoxLayout()
         stats_box.setSpacing(24)
-
-        self.lbl_balance    = self._stat("SALDO",    "──────",  "#00d4ff")
-        self.lbl_pnl        = self._stat("P&L",      "──────",  "#00ff88")
-        self.lbl_trades     = self._stat("TRADES",   "0",       "#ffd700")
-        self.lbl_winrate    = self._stat("WIN RATE", "──",      "#a78bfa")
-        self.lbl_conn       = self._stat("DERIV",    "⬤ OFF",   "#ff4444")
-        self.lbl_time       = self._stat("HORA",     "──:──:──", "#4a6a9a")
-
-        for box in [
-            self.lbl_balance, self.lbl_pnl, self.lbl_trades,
-            self.lbl_winrate, self.lbl_conn, self.lbl_time
-        ]:
+        self.lbl_balance = self._stat("SALDO",    "──────",   "#00d4ff")
+        self.lbl_pnl     = self._stat("P&L",      "──────",   "#00ff88")
+        self.lbl_trades  = self._stat("TRADES",   "0",        "#ffd700")
+        self.lbl_winrate = self._stat("WIN RATE", "──",       "#a78bfa")
+        self.lbl_conn    = self._stat("DERIV",    "⬤ OFF",    "#ff4444")
+        self.lbl_time    = self._stat("HORA",     "──:──:──", "#4a6a9a")
+        for box in [self.lbl_balance, self.lbl_pnl, self.lbl_trades,
+                    self.lbl_winrate, self.lbl_conn, self.lbl_time]:
             stats_box.addLayout(box["layout"])
-
         layout.addLayout(stats_box)
         layout.addSpacing(20)
 
-        # Buttons
         btn_box = QHBoxLayout()
         self.btn_start = QPushButton("▶  INICIAR")
         self.btn_start.setObjectName("btn_start")
         self.btn_start.setFixedWidth(130)
+        self.btn_start.setEnabled(False)   # ← desabilitado até preload terminar
 
         self.btn_stop = QPushButton("■  PARAR")
         self.btn_stop.setObjectName("btn_stop")
@@ -184,13 +157,11 @@ class HeaderBar(QFrame):
         btn_box.addWidget(self.btn_stop)
         layout.addLayout(btn_box)
 
-        # Clock update
         self._clock = QTimer()
         self._clock.timeout.connect(self._update_clock)
         self._clock.start(1000)
 
         BUS.subscribe(Events.BALANCE_UPDATE, self._on_balance)
-        BUS.subscribe(Events.TRADE_CLOSE,    self._on_trade)
 
     def _stat(self, title: str, value: str, color: str) -> dict:
         box   = QVBoxLayout()
@@ -214,7 +185,7 @@ class HeaderBar(QFrame):
             "color: #00ff88; font-size: 15px; font-weight: 900;"
         )
 
-    def _on_trade_stats(self, wins: int, total: int, pnl: float):
+    def set_trading_stats(self, wins: int, total: int, pnl: float):
         wr = wins / total * 100 if total > 0 else 0.0
         self.lbl_trades["value_lbl"].setText(str(total))
         self.lbl_winrate["value_lbl"].setText(f"{wr:.1f}%")
@@ -224,18 +195,22 @@ class HeaderBar(QFrame):
         )
         self.lbl_pnl["value_lbl"].setText(f"$ {pnl:+.2f}")
 
-    async def _on_trade(self, _e: str, _data: dict):
-        pass   # delegated to RiskPanel
-
 
 # ── Main Window ────────────────────────────────────────────────────────────
+
 class MainWindow(QMainWindow):
-    def __init__(self, boot_coro, parent=None):
+    """
+    A janela não inicia o backend.
+    O backend já roda via main.py desde o launch.
+    O botão INICIAR apenas emite Events.SYSTEM_START.
+    O botão PARAR emite Events.SYSTEM_STOP.
+    """
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._boot_coro  = boot_coro
-        self._async_thread: AsyncThread = None
         self._wins = self._losses = 0
         self._pnl  = 0.0
+        self._trading = False
 
         self.setWindowTitle("NEXUS QUANTUM ULTRA — AI Trading System")
         self.setMinimumSize(1400, 900)
@@ -243,6 +218,9 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._connect_buttons()
+        self._subscribe_events()
+
+    # ── UI Setup ───────────────────────────────────────────────────────────
 
     def _setup_ui(self):
         central = QWidget()
@@ -251,46 +229,36 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Header ─────────────────────────────────────────────────────────
         self.header = HeaderBar()
         root.addWidget(self.header)
 
-        # ── Preload progress bar (hidden after load) ────────────────────────
+        # Preload bar — visível apenas durante preload inicial
         self.preload_bar = QProgressBar()
         self.preload_bar.setRange(0, 100)
         self.preload_bar.setValue(0)
-        self.preload_bar.setFormat("Carregando histórico... %v%")
+        self.preload_bar.setFormat("Carregando histórico... %p%")
         self.preload_bar.setFixedHeight(22)
-        self.preload_bar.hide()
+        self.preload_bar.show()   # visível desde o início pois preload roda no boot
         root.addWidget(self.preload_bar)
 
-        # ── Main splitter ──────────────────────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(3)
 
-        # Left: tabs
         tabs = QTabWidget()
         tabs.setMinimumWidth(900)
 
-        # Tab 1 — Chart
-        self.chart_panel = ChartPanel()
-        tabs.addTab(self.chart_panel, "📈  Gráfico")
-
-        # Tab 2 — Agents
+        self.chart_panel  = ChartPanel()
         self.agents_panel = AgentsPanel()
-        tabs.addTab(self.agents_panel, "🤖  Agentes")
-
-        # Tab 3 — Council
         self.council_panel = CouncilPanel()
-        tabs.addTab(self.council_panel, "⚖️  Conselho Groq")
-
-        # Tab 4 — Trades history
         self.trades_table = TradesTable()
-        tabs.addTab(self.trades_table, "📋  Trades")
+
+        tabs.addTab(self.chart_panel,   "📈  Gráfico")
+        tabs.addTab(self.agents_panel,  "🤖  Agentes")
+        tabs.addTab(self.council_panel, "⚖️  Conselho Groq")
+        tabs.addTab(self.trades_table,  "📋  Trades")
 
         splitter.addWidget(tabs)
 
-        # Right: risk + log
         right = QWidget()
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
@@ -312,55 +280,69 @@ class MainWindow(QMainWindow):
         splitter.setSizes([1100, 420])
         root.addWidget(splitter)
 
-        # ── Status bar ─────────────────────────────────────────────────────
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("NEXUS QUANTUM ULTRA  ·  Pronto para iniciar")
-
-        # ── Bus subscriptions ──────────────────────────────────────────────
-        BUS.subscribe("preload.progress", self._on_preload_progress)
-        BUS.subscribe(Events.PRELOAD_ALL, self._on_preload_done)
-        BUS.subscribe(Events.TRADE_CLOSE, self._on_trade_close)
-        BUS.subscribe(Events.SYSTEM_STOP, self._on_system_stop)
+        self.status_bar.showMessage("NEXUS QUANTUM ULTRA  ·  Inicializando...")
 
     def _connect_buttons(self):
-        self.header.btn_start.clicked.connect(self._start_system)
-        self.header.btn_stop.clicked.connect(self._stop_system)
+        self.header.btn_start.clicked.connect(self._on_start_clicked)
+        self.header.btn_stop.clicked.connect(self._on_stop_clicked)
 
-    def _start_system(self):
+    def _subscribe_events(self):
+        BUS.subscribe("preload.progress",  self._on_preload_progress)
+        BUS.subscribe(Events.PRELOAD_ALL,  self._on_preload_done)
+        BUS.subscribe(Events.TRADE_CLOSE,  self._on_trade_close)
+        BUS.subscribe(Events.SYSTEM_STOP,  self._on_system_stop)
+        BUS.subscribe(Events.AGENT_STATUS, self._on_agent_status)
+
+    # ── Button Handlers ────────────────────────────────────────────────────
+
+    def _on_start_clicked(self):
+        """Apenas emite sinal — NÃO reinicia backend nem preload."""
+        if self._trading:
+            return
+        self._trading = True
         self.header.btn_start.setEnabled(False)
         self.header.btn_stop.setEnabled(True)
-        self.preload_bar.show()
-        self.status_bar.showMessage("Iniciando NEXUS QUANTUM ULTRA...")
+        self.status_bar.showMessage("▶ Operação iniciada — agentes ativos")
 
-        if self._boot_coro:
-            self._async_thread = AsyncThread(self._boot_coro)
-            self._async_thread.start()
+        # Sinaliza agentes para começar a operar
+        asyncio.ensure_future(
+            BUS.emit(Events.SYSTEM_START, {"mode": "auto"})
+        )
 
-    def _stop_system(self):
-        if self._async_thread and self._async_thread.loop:
-            self._async_thread.loop.call_soon_threadsafe(
-                self._async_thread.loop.stop
-            )
+    def _on_stop_clicked(self):
+        """Pausa operação sem matar o backend."""
+        self._trading = False
         self.header.btn_start.setEnabled(True)
         self.header.btn_stop.setEnabled(False)
-        self.status_bar.showMessage("Sistema parado.")
+        self.status_bar.showMessage("■ Operação pausada")
+
+        asyncio.ensure_future(
+            BUS.emit(Events.SYSTEM_STOP, {"reason": "user_stop", "restart": False})
+        )
+
+    # ── Event Handlers ─────────────────────────────────────────────────────
 
     async def _on_preload_progress(self, _e: str, data: dict):
         pct = int(data.get("progress", 0))
         self.preload_bar.setValue(pct)
         self.status_bar.showMessage(
-            f"Pré-carregando: {data.get('symbol','')} "
-            f"[{data.get('completed',0)}/{data.get('total',0)}]  "
-            f"— {data.get('candles',0):,} velas"
+            f"Pré-carregando: {data.get('symbol', '')} "
+            f"[{data.get('completed', 0)}/{data.get('total', 0)}]"
+            f"  —  {data.get('candles', 0):,} velas"
         )
 
     async def _on_preload_done(self, _e: str, data: dict):
+        """Preload terminou — esconde barra e libera botão INICIAR."""
+        self.preload_bar.setValue(100)
         self.preload_bar.hide()
         total = data.get("total_candles", 0)
         self.status_bar.showMessage(
-            f"✅ Pré-carga concluída — {total:,} velas carregadas  ·  Sistema operacional"
+            f"✅ {total:,} velas carregadas  ·  Clique em INICIAR para operar"
         )
+        # ← LIBERA o botão apenas após preload concluir
+        self.header.btn_start.setEnabled(True)
 
     async def _on_trade_close(self, _e: str, data: dict):
         outcome = data.get("outcome", "")
@@ -371,10 +353,19 @@ class MainWindow(QMainWindow):
         else:
             self._losses += 1
         total = self._wins + self._losses
-        self.header._on_trade_stats(self._wins, total, self._pnl)
+        self.header.set_trading_stats(self._wins, total, self._pnl)
 
     async def _on_system_stop(self, _e: str, data: dict):
+        if data.get("restart", True):
+            return   # reconexão automática — não altera UI
         reason = data.get("reason", "unknown")
-        self.status_bar.showMessage(f"⛔ Sistema parado — {reason}")
+        self._trading = False
         self.header.btn_start.setEnabled(True)
         self.header.btn_stop.setEnabled(False)
+        self.status_bar.showMessage(f"⛔ Parado — {reason}")
+
+    async def _on_agent_status(self, _e: str, data: dict):
+        agent  = data.get("agent",  "")
+        status = data.get("status", "")
+        if agent == "DERIV" and status == "running":
+            self.status_bar.showMessage("🔗 Deriv conectado — aguardando preload...")

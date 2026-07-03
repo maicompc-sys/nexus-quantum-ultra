@@ -135,16 +135,12 @@ class PreloadSession:
                 ping_timeout  = 20,
                 close_timeout = 10,
                 max_size      = 2 ** 22,    # 4MB para batches grandes
-                extra_headers = {
-                    "Deriv-App-ID": DERIV_APP_ID,
-                    "User-Agent":   "NexusQuantumUltra/2.0",
-                },
             )
 
             self._alive = True
             asyncio.create_task(self._listen(), name="preload_listener")
             await asyncio.sleep(0.3)
-            agent_log("PRELOAD", "[OK] Sessão de preload conectada")
+            agent_log("PRELOAD", "✅ Sessão de preload conectada")
             return True
 
         except Exception as e:

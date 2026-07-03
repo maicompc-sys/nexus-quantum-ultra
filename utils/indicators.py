@@ -38,7 +38,8 @@ def rsi(prices: np.ndarray, period: int = 14) -> np.ndarray:
         avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gains[i - 1]) / period
         avg_loss[i] = (avg_loss[i - 1] * (period - 1) + losses[i - 1]) / period
 
-    rs     = np.where(avg_loss == 0, 100.0, avg_gain / avg_loss)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs     = np.where(avg_loss == 0, 100.0, avg_gain / avg_loss)
     result = 100 - (100 / (1 + rs))
     result[:period] = np.nan
     return result

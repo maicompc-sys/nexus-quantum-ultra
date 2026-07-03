@@ -138,11 +138,7 @@ def main():
     deriv = DerivClient()
 
     # ── Janela principal ────────────────────────────────────────────────
-    # Adaptado para funcionar se o construtor for MainWindow(boot_coro=None) ou MainWindow(deriv)
-    try:
-        window = MainWindow(boot_coro=None)
-    except TypeError:
-        window = MainWindow(deriv)
+    window = MainWindow()
     window.show()
 
     # ── Event loop Qt + asyncio ─────────────────────────────────────────

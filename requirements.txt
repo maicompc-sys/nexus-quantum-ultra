@@ -1,0 +1,16 @@
+PyQt6
+PyQt6-Charts
+pyqtgraph
+torch
+numpy
+pandas
+sqlalchemy
+alembic
+aiosqlite
+websockets
+groq
+python-telegram-bot
+cryptography
+python-dotenv
+httpx
+redis

@@ -3,9 +3,9 @@ NEXUS QUANTUM ULTRA — LSTM Neural Network (PyTorch)
 Predicts CALL / PUT / HOLD from candle sequences.
 """
 
-import torch
-import torch.nn as nn
-import numpy as np
+import torch          # type: ignore[import]
+import torch.nn as nn  # type: ignore[import]
+import numpy as np    # type: ignore[import]
 from typing import Tuple
 from utils.config import NN_HIDDEN_SIZE, NN_LOOKBACK
 

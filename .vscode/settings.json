@@ -1,10 +1,11 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  "python.defaultInterpreterPath": "c:\\Users\\maico\\OneDrive\\Área de Trabalho\\NEXUS QUANTUM ULTRA\\nexus-quantum-ultra\\.venv\\Scripts\\python.exe",
   "python.analysis.extraPaths": [
-    "${workspaceFolder}"
+    "c:\\Users\\maico\\OneDrive\\Área de Trabalho\\NEXUS QUANTUM ULTRA\\nexus-quantum-ultra"
   ],
   "python.analysis.typeCheckingMode": "off",
-  "[python]": {
-    "editor.defaultFormatter": "ms-python.python"
-  }
+  "python.analysis.reportMissingImports": "none",
+  "python.analysis.reportMissingModuleSource": "none",
+  "python.analysis.useLibraryCodeForTypes": true,
+  "python.terminal.activateEnvironment": true
 }

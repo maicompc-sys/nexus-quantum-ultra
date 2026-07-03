@@ -3,11 +3,10 @@ NEXUS QUANTUM ULTRA — Database Repository
 Async CRUD layer using SQLAlchemy + aiosqlite.
 """
 
-import asyncio
 import hashlib
 import json
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from datetime import datetime, timedelta, timezone
+from typing import Optional, List, Dict, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import select, update, delete, func, and_, desc
@@ -18,6 +17,11 @@ from database.models import (
 )
 from utils.config import DB_URL
 from utils.logger import agent_log
+
+
+def _now() -> datetime:
+    """datetime timezone-aware em UTC (substitui datetime.utcnow())."""
+    return datetime.now(timezone.utc)
 
 
 # ── Engine & Session ───────────────────────────────────────────────────────
@@ -62,7 +66,7 @@ async def upsert_candles(candles: List[Dict]) -> int:
 async def get_candles(
     symbol: str,
     granularity: int,
-    limit: int = 5000
+    limit: int = 5000,
 ) -> List[Dict]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -71,7 +75,7 @@ async def get_candles(
             .order_by(desc(Candle.epoch))
             .limit(limit)
         )
-        rows = result.scalars().all()
+        rows = list(result.scalars().all())
         return [r.to_dict() for r in reversed(rows)]
 
 
@@ -111,7 +115,7 @@ async def update_trade_outcome(
                 profit=profit,
                 exit_price=exit_price,
                 payout=payout,
-                closed_at=datetime.utcnow(),
+                closed_at=_now(),
             )
         )
         await session.commit()
@@ -124,7 +128,7 @@ async def get_recent_trades(limit: int = 50) -> List[Trade]:
             .order_by(desc(Trade.opened_at))
             .limit(limit)
         )
-        return result.scalars().all()
+        return list(result.scalars().all())
 
 
 async def get_trade_stats(symbol: Optional[str] = None) -> Dict:
@@ -141,15 +145,16 @@ async def get_trade_stats(symbol: Optional[str] = None) -> Dict:
         wins_q = select(func.count(Trade.id)).where(Trade.outcome == "WIN")
         if symbol:
             wins_q = wins_q.where(Trade.symbol == symbol)
-        wins = (await session.execute(wins_q)).scalar_one()
+        wins = int((await session.execute(wins_q)).scalar_one() or 0)
 
-        total = row.total or 0
+        total     = int(row.total or 0)
+        net_pnl   = float(row.net_profit or 0.0)
         return {
             "total":      total,
             "wins":       wins,
             "losses":     total - wins,
             "win_rate":   round(wins / total * 100, 2) if total > 0 else 0.0,
-            "net_profit": round(row.net_profit or 0.0, 2),
+            "net_profit": round(net_pnl, 2),
         }
 
 
@@ -163,7 +168,7 @@ async def save_strategy(data: Dict) -> Strategy:
         if strat:
             for k, v in data.items():
                 setattr(strat, k, v)
-            strat.last_updated_at = datetime.utcnow()
+            strat.last_updated_at = _now()  # type: ignore[assignment]
         else:
             strat = Strategy(**data)
             session.add(strat)
@@ -179,7 +184,7 @@ async def get_active_strategies() -> List[Strategy]:
             .where(Strategy.is_active == True, Strategy.is_blocked == False)
             .order_by(desc(Strategy.win_rate))
         )
-        return result.scalars().all()
+        return list(result.scalars().all())
 
 
 async def block_strategy(name: str, reason: str) -> None:
@@ -187,7 +192,7 @@ async def block_strategy(name: str, reason: str) -> None:
         await session.execute(
             update(Strategy)
             .where(Strategy.name == name)
-            .values(is_blocked=True, block_reason=reason, last_updated_at=datetime.utcnow())
+            .values(is_blocked=True, block_reason=reason, last_updated_at=_now())
         )
         await session.commit()
         agent_log("AUDITOR", f"Estratégia bloqueada: {name} — {reason}")
@@ -201,17 +206,27 @@ async def update_strategy_stats(name: str, won: bool, profit: float) -> None:
         strat = result.scalar_one_or_none()
         if not strat:
             return
-        strat.total_trades  += 1
-        strat.total_wins    += int(won)
-        strat.total_profit  += profit
-        strat.win_rate       = round(strat.total_wins / strat.total_trades * 100, 2)
-        strat.last_used_at   = datetime.utcnow()
-        strat.last_updated_at = datetime.utcnow()
-        # Auto-block if win_rate < 35% after 20+ trades
-        if strat.total_trades >= 20 and strat.win_rate < 35.0:
-            strat.is_blocked  = True
-            strat.block_reason = f"Win rate abaixo de 35% ({strat.win_rate}%) após {strat.total_trades} trades"
-            agent_log("AUDITOR", f"Auto-bloqueio: {name} — win_rate={strat.win_rate}%")
+
+        total_trades  = int(strat.total_trades or 0) + 1        # type: ignore[arg-type]
+        total_wins    = int(strat.total_wins   or 0) + int(won) # type: ignore[arg-type]
+        total_profit  = float(strat.total_profit or 0) + profit  # type: ignore[arg-type]
+        win_rate      = round(total_wins / total_trades * 100, 2)
+
+        strat.total_trades   = total_trades   # type: ignore[assignment]
+        strat.total_wins     = total_wins     # type: ignore[assignment]
+        strat.total_profit   = total_profit   # type: ignore[assignment]
+        strat.win_rate       = win_rate       # type: ignore[assignment]
+        strat.last_used_at   = _now()         # type: ignore[assignment]
+        strat.last_updated_at = _now()        # type: ignore[assignment]
+
+        # Auto-block se win_rate < 35% após 20+ trades
+        if total_trades >= 20 and win_rate < 35.0:
+            strat.is_blocked   = True         # type: ignore[assignment]
+            strat.block_reason = (            # type: ignore[assignment]
+                f"Win rate abaixo de 35% ({win_rate}%) após {total_trades} trades"
+            )
+            agent_log("AUDITOR", f"Auto-bloqueio: {name} — win_rate={win_rate}%")
+
         await session.commit()
 
 
@@ -236,7 +251,7 @@ async def add_blocked_pattern(
             loss_streak  = loss_streak,
             total_loss   = total_loss,
             indicators   = indicators,
-            expires_at   = datetime.utcnow() + timedelta(hours=expires_hours),
+            expires_at   = _now() + timedelta(hours=expires_hours),
         ))
         await session.commit()
 
@@ -250,7 +265,7 @@ async def is_pattern_blocked(symbol: str, indicators: Dict) -> bool:
             select(BlockedPattern).where(
                 BlockedPattern.pattern_hash == pattern_hash,
                 BlockedPattern.symbol       == symbol,
-                BlockedPattern.expires_at   > datetime.utcnow(),
+                BlockedPattern.expires_at   > _now(),
             )
         )
         return result.scalar_one_or_none() is not None
@@ -268,7 +283,7 @@ async def get_council_logs(limit: int = 20) -> List[CouncilLog]:
         result = await session.execute(
             select(CouncilLog).order_by(desc(CouncilLog.created_at)).limit(limit)
         )
-        return result.scalars().all()
+        return list(result.scalars().all())
 
 
 # ── Agent Decisions ────────────────────────────────────────────────────────
@@ -298,7 +313,7 @@ async def get_latest_neural_snapshot() -> Optional[NeuralSnapshot]:
 
 # ── Daily Stats ────────────────────────────────────────────────────────────
 async def update_daily_stats() -> None:
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = _now().strftime("%Y-%m-%d")
     stats = await get_trade_stats()
 
     async with AsyncSessionLocal() as session:
@@ -307,11 +322,11 @@ async def update_daily_stats() -> None:
         )
         row = result.scalar_one_or_none()
         if row:
-            row.total_trades = stats["total"]
-            row.wins         = stats["wins"]
-            row.losses       = stats["losses"]
-            row.win_rate     = stats["win_rate"]
-            row.net_profit   = stats["net_profit"]
+            row.total_trades = stats["total"]    # type: ignore[assignment]
+            row.wins         = stats["wins"]     # type: ignore[assignment]
+            row.losses       = stats["losses"]   # type: ignore[assignment]
+            row.win_rate     = stats["win_rate"] # type: ignore[assignment]
+            row.net_profit   = stats["net_profit"] # type: ignore[assignment]
         else:
             session.add(DailyStats(
                 date         = today,
@@ -337,4 +352,4 @@ async def get_candle_count(symbol: str, granularity: int) -> int:
             select(func.count(Candle.id))
             .where(Candle.symbol == symbol, Candle.granularity == granularity)
         )
-        return result.scalar_one() or 0
+        return int(result.scalar_one() or 0)

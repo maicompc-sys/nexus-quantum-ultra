@@ -1,5 +1,6 @@
 {
-  "venvPath": ".",
+  "pythonPath": "c:/Users/maico/OneDrive/Área de Trabalho/NEXUS QUANTUM ULTRA/nexus-quantum-ultra/.venv/Scripts/python.exe",
+  "venvPath": "c:/Users/maico/OneDrive/Área de Trabalho/NEXUS QUANTUM ULTRA/nexus-quantum-ultra",
   "venv": ".venv",
   "pythonVersion": "3.14",
   "pythonPlatform": "Windows",
@@ -18,5 +19,8 @@
     "data",
     "models"
   ],
-  "typeCheckingMode": "off"
+  "typeCheckingMode": "off",
+  "useLibraryCodeForTypes": true,
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none"
 }

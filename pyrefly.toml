@@ -1,0 +1,9 @@
+[pyrefly]
+# Usa o interpretador do .venv
+python_interpreter = ".venv/Scripts/python.exe"
+
+# Ignora modulos de terceiros nao encontrados (instalados no .venv)
+ignore_missing_imports = true
+
+# Nao reportar erros de tipo em libs externas
+use_untyped_imports = true

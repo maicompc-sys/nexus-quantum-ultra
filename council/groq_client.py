@@ -22,7 +22,7 @@ MODEL_ROSTER = [GROQ_MODEL_A, GROQ_MODEL_B, GROQ_MODEL_C]
 # Rate limit tracking per key
 _key_last_call: Dict[int, float] = {0: 0.0, 1: 0.0, 2: 0.0}
 _key_errors:    Dict[int, int]   = {0: 0,   1: 0,   2: 0}
-_MIN_GAP        = 1.2   # seconds between calls on same key
+_MIN_GAP = 1.2   # seconds between calls on same key
 
 
 def _extract_json(text: str) -> Optional[Dict]:
@@ -33,13 +33,11 @@ def _extract_json(text: str) -> Optional[Dict]:
     if not text:
         return None
 
-    # Try direct parse first
     try:
         return json.loads(text.strip())
     except Exception:
         pass
 
-    # Find JSON block in markdown
     match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if match:
         try:
@@ -47,25 +45,36 @@ def _extract_json(text: str) -> Optional[Dict]:
         except Exception:
             pass
 
-    # Find raw {...} block
-    match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except Exception:
-            pass
+    # Tenta encontrar JSON aninhado (nested braces)
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    return json.loads(text[start:i+1])
+                except Exception:
+                    start = None
 
     return None
 
 
 class GroqClient:
     def __init__(self):
-        self._clients = [AsyncGroq(api_key=k) for k in GROQ_KEYS]
+        if not GROQ_KEYS:
+            agent_log("COUNCIL", "Nenhuma GROQ_KEY configurada no .env! Conclave desativado.", logging.CRITICAL)
+        self._clients     = [AsyncGroq(api_key=k) for k in GROQ_KEYS] if GROQ_KEYS else []
         self._current_key = 0
 
     def _next_key(self) -> int:
         """Round-robin key selection, skipping throttled keys."""
-        start = self._current_key
+        if not self._clients:
+            return -1
         for _ in range(len(GROQ_KEYS)):
             idx = self._current_key % len(GROQ_KEYS)
             self._current_key = (self._current_key + 1) % len(GROQ_KEYS)
@@ -74,19 +83,17 @@ class GroqClient:
             elapsed = now - _key_last_call[idx]
             errors  = _key_errors[idx]
 
-            # Skip keys with too many recent errors
             if errors >= 3:
                 backoff = min(60.0, 2 ** errors)
                 if elapsed < backoff:
                     continue
                 else:
-                    _key_errors[idx] = 0   # reset after backoff
+                    _key_errors[idx] = 0
 
             if elapsed >= _MIN_GAP:
                 return idx
 
-        # All keys throttled — use least-recently-used
-        return min(_key_last_call, key=_key_last_call.get)
+        return min(range(len(GROQ_KEYS)), key=lambda i: _key_last_call[i])
 
     async def call(
         self,
@@ -97,18 +104,19 @@ class GroqClient:
         temperature: float = 0.3,
         retries: int = 3,
     ) -> Dict[str, Any]:
-        """
-        Single model call with retry and JSON extraction.
-        Returns: {content, model, key_idx, tokens, latency_ms, error}
-        """
+        if not self._clients:
+            return {"content": {}, "raw": "", "model": model, "key_idx": -1,
+                    "tokens": 0, "latency_ms": 0, "error": "no_groq_keys"}
+
         last_error = ""
         for attempt in range(retries):
             key_idx = self._next_key()
-            client  = self._clients[key_idx]
-            t0      = time.time()
+            if key_idx < 0:
+                break
+            client = self._clients[key_idx]
+            t0     = time.time()
 
             try:
-                # Enforce min gap
                 elapsed = t0 - _key_last_call[key_idx]
                 if elapsed < _MIN_GAP:
                     await asyncio.sleep(_MIN_GAP - elapsed)
@@ -118,16 +126,16 @@ class GroqClient:
                 resp = await client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system",  "content": system_prompt},
-                        {"role": "user",    "content": user_prompt},
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
                     ],
                     max_tokens=max_tokens,
                     temperature=temperature,
                 )
 
-                raw_text  = resp.choices[0].message.content or ""
-                tokens    = resp.usage.total_tokens if resp.usage else 0
-                latency   = int((time.time() - t0) * 1000)
+                raw_text = resp.choices[0].message.content or ""
+                tokens   = resp.usage.total_tokens if resp.usage else 0
+                latency  = int((time.time() - t0) * 1000)
 
                 parsed = _extract_json(raw_text)
                 if parsed is None:
@@ -148,7 +156,7 @@ class GroqClient:
 
             except Exception as e:
                 last_error = str(e)
-                _key_errors[key_idx] = _key_errors.get(key_idx, 0) + 1
+                _key_errors[key_idx] = _key_errors[key_idx] + 1
                 wait = 2 ** attempt
                 agent_log(
                     "COUNCIL",
@@ -186,7 +194,6 @@ class GroqClient:
             "Responda SEMPRE em JSON válido conforme solicitado. Seja preciso e objetivo."
         )
 
-        # ── Model A: Analysis ──────────────────────────────────────────────
         prompt_a = f"""
 Símbolo: {symbol}
 Contexto de mercado:
@@ -206,7 +213,6 @@ Analise profundamente e retorne JSON:
 """
         result_a = await self.call(GROQ_MODEL_A, SYSTEM_BASE, prompt_a)
 
-        # ── Model B: Challenge ─────────────────────────────────────────────
         prompt_b = f"""
 Símbolo: {symbol}
 Contexto de mercado:
@@ -226,7 +232,6 @@ Desafie criticamente esta análise e retorne JSON:
 """
         result_b = await self.call(GROQ_MODEL_B, SYSTEM_BASE, prompt_b)
 
-        # ── Model C: Synthesis ─────────────────────────────────────────────
         prompt_c = f"""
 Símbolo: {symbol}
 Contexto: {context_str}

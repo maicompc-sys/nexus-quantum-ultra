@@ -32,17 +32,16 @@ SAVE_CHUNK_SIZE  = 1000
 REST_BASE        = "https://api.derivws.com"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-
 class PreloadSession:
     """Sessão WS isolada para preload — não interfere com o DerivClient principal."""
 
     def __init__(self):
-        self._ws       = None
-        self._req_id   = 1
-        self._pending: Dict[int, asyncio.Future] = {}
-        self._lock     = asyncio.Lock()
-        self._alive    = False
+        self._ws            = None
+        self._listen_task:  Optional[asyncio.Task] = None   # referência forte
+        self._req_id        = 1
+        self._pending:      Dict[int, asyncio.Future] = {}
+        self._lock          = asyncio.Lock()
+        self._alive         = False
 
     # ── OTP ──────────────────────────────────────────────────────────────────
 
@@ -51,7 +50,7 @@ class PreloadSession:
         if not DERIV_ACCOUNT_ID:
             agent_log("PRELOAD",
                 "DERIV_ACCOUNT_ID não configurado!\n"
-                "→ Adicione no .env: DERIV_ACCOUNT_ID=DOT93171699",
+                "→ Adicione no .env: DERIV_ACCOUNT_ID=VRTCseu_loginid",
                 logging.CRITICAL
             )
             return None
@@ -92,18 +91,16 @@ class PreloadSession:
                         return None
 
                     elif resp.status == 401:
-                        body = await resp.text()
                         agent_log("PRELOAD",
-                            f"401 Unauthorized no preload OTP.\n"
-                            f"Verifique DERIV_APP_ID e DERIV_API_TOKEN.\n"
-                            f"Body: {body[:200]}",
+                            "401 Unauthorized no preload OTP. "
+                            "Verifique DERIV_APP_ID e DERIV_API_TOKEN.",
                             logging.ERROR
                         )
                         return None
 
                     elif resp.status == 404:
                         agent_log("PRELOAD",
-                            f"404 — DERIV_ACCOUNT_ID '{DERIV_ACCOUNT_ID}' inválido.",
+                            "404 — DERIV_ACCOUNT_ID inválido. Verifique o .env",
                             logging.ERROR
                         )
                         return None
@@ -134,11 +131,14 @@ class PreloadSession:
                 ping_interval = 30,
                 ping_timeout  = 20,
                 close_timeout = 10,
-                max_size      = 2 ** 22,    # 4MB para batches grandes
+                max_size      = 2 ** 22,
             )
 
             self._alive = True
-            asyncio.create_task(self._listen(), name="preload_listener")
+            # Guarda referência forte para evitar GC
+            self._listen_task = asyncio.create_task(
+                self._listen(), name="preload_listener"
+            )
             await asyncio.sleep(0.3)
             agent_log("PRELOAD", "✅ Sessão de preload conectada")
             return True
@@ -170,7 +170,7 @@ class PreloadSession:
                     fut.set_exception(ConnectionError("Preload WS fechado"))
             self._pending.clear()
 
-    # ── Request ───────────────────────────────────────────────────────────────
+    # ── Request — lock protege send completo ──────────────────────────────────
 
     async def _request(self, payload: Dict, timeout: float = 40.0) -> Optional[Dict]:
         if not self._ws or not self._alive:
@@ -179,13 +179,17 @@ class PreloadSession:
         async with self._lock:
             rid           = self._req_id
             self._req_id += 1
-
-        fut                = asyncio.get_event_loop().create_future()
-        self._pending[rid] = fut
-        payload["req_id"]  = rid
+            fut                = asyncio.get_running_loop().create_future()
+            self._pending[rid] = fut
+            payload["req_id"]  = rid
+            try:
+                await self._ws.send(json.dumps(payload))
+            except Exception as e:
+                self._pending.pop(rid, None)
+                agent_log("PRELOAD", f"Send error: {e}", logging.WARNING)
+                return None
 
         try:
-            await self._ws.send(json.dumps(payload))
             return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(rid, None)
@@ -244,6 +248,8 @@ class PreloadSession:
 
     async def close(self) -> None:
         self._alive = False
+        if self._listen_task:
+            self._listen_task.cancel()
         if self._ws:
             try:
                 await self._ws.close()
@@ -331,9 +337,8 @@ class Preloader:
         incremental: bool,
     ) -> int:
 
-        # ── Incremental check ──────────────────────────────────────────
         if incremental:
-            existing = await get_candle_count(symbol, granularity)
+            existing  = await get_candle_count(symbol, granularity)
             remaining = PRELOAD_TARGET - existing
             if remaining <= 0:
                 agent_log("PRELOAD", f"{symbol}/{granularity}s: completo ({existing:,}) — skip")
@@ -346,7 +351,6 @@ class Preloader:
         else:
             target = PRELOAD_TARGET
 
-        # ── Fetch backwards ────────────────────────────────────────────
         total_saved = 0
         end_epoch   = None
         retries     = 0
@@ -362,7 +366,6 @@ class Preloader:
                 end_epoch   = end_epoch,
             )
 
-            # Retry
             if candles is None:
                 retries += 1
                 if retries >= max_retries:
@@ -377,21 +380,18 @@ class Preloader:
             retries = 0
 
             if not candles:
-                break   # Sem mais dados
+                break
 
-            # ── Salva em chunks ────────────────────────────────────────
             for i in range(0, len(candles), SAVE_CHUNK_SIZE):
                 chunk = candles[i:i + SAVE_CHUNK_SIZE]
                 saved = await save_candles_batch(chunk)
                 total_saved += saved
 
-            # ── Caminha para trás ──────────────────────────────────────
             oldest = min(c["epoch"] for c in candles)
             if end_epoch and oldest >= end_epoch:
-                break   # Sem progresso
+                break
 
             end_epoch = oldest - 1
-
             await asyncio.sleep(RATE_LIMIT_DELAY)
 
             if total_saved % 5000 == 0 and total_saved > 0:

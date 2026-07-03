@@ -1,32 +1,42 @@
-# Environment & secrets
-.env
-.tokens.enc
-*.enc
-
-# Python
+# ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyo
-.venv/
-venv/
+*$py.class
+*.so
+*.egg
 *.egg-info/
 dist/
 build/
+.eggs/
 
-# Database
+# ── Ambientes virtuais ────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env.local
+
+# ── SEGURANÇA — NUNCA commitar ────────────────────────────────────────────
+.env
+*.env
+!.env.example
+
+# ── Dados e modelos ───────────────────────────────────────────────────────
+data/
+models/
 *.db
-*.db-journal
+*.sqlite
+*.sqlite3
 
-# Neural models
-neural/saved_models/
-*.pt
-*.pth
-
-# Logs
-*.log
+# ── Logs ─────────────────────────────────────────────────────────────────
 logs/
+*.log
 
-# OS
+# ── IDE ───────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── OS ────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-desktop.ini

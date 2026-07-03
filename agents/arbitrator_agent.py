@@ -12,7 +12,6 @@ from core.event_bus import BUS, Events
 from utils.logger import agent_log
 from utils.config import MIN_CONFIDENCE, SYMBOLS
 
-# Weights per agent
 AGENT_WEIGHTS = {
     "QUANT":    0.25,
     "SENTINEL": 0.20,
@@ -32,8 +31,8 @@ class ArbitratorAgent:
         self._signals: Dict[str, Dict[str, Dict]] = defaultdict(dict)
         self._council_signals: Dict[str, Dict] = {}
 
-        BUS.subscribe(Events.AGENT_SIGNAL,  self._on_agent_signal)
-        BUS.subscribe(Events.COUNCIL_DONE,  self._on_council_done)
+        BUS.subscribe(Events.AGENT_SIGNAL, self._on_agent_signal)
+        BUS.subscribe(Events.COUNCIL_DONE, self._on_council_done)
 
     async def _on_agent_signal(self, _event: str, data: Dict) -> None:
         agent  = data.get("agent", "")
@@ -48,20 +47,19 @@ class ArbitratorAgent:
             await self._arbitrate(symbol)
 
     async def _arbitrate(self, symbol: str) -> None:
-        # Check sentinel clearance
         if not self._sentinel.is_clear(symbol):
             agent_log(self.NAME, f"{symbol} bloqueado pelo Sentinel — sem GO")
             return
 
-        # Check risk halt
-        if self._risk._trading_halted:
+        # Usa método público para não acessar atributo privado diretamente
+        risk_status = self._risk.get_status()
+        if risk_status.get("halted", False):
             agent_log(self.NAME, "Trading HALTED — sem GO")
             return
 
         signals = self._signals.get(symbol, {})
         council = self._council_signals.get(symbol, {})
 
-        # Weighted vote
         vote_call = 0.0
         vote_put  = 0.0
         total_w   = 0.0
@@ -76,7 +74,6 @@ class ArbitratorAgent:
                 vote_put  += weight * c
             total_w += weight
 
-        # Council carries heavy weight
         council_signal = council.get("signal", "HOLD")
         council_conf   = council.get("confidence", 0.0)
         COUNCIL_W      = 0.40
@@ -88,12 +85,10 @@ class ArbitratorAgent:
 
         total_w += COUNCIL_W
 
-        # Normalize
         if total_w > 0:
             vote_call /= total_w
             vote_put  /= total_w
 
-        # Decision
         if vote_call > vote_put and vote_call >= MIN_CONFIDENCE:
             direction  = "CALL"
             confidence = vote_call
@@ -101,20 +96,14 @@ class ArbitratorAgent:
             direction  = "PUT"
             confidence = vote_put
         else:
-            agent_log(
-                self.NAME,
-                f"{symbol} HOLD — CALL={vote_call:.2f} PUT={vote_put:.2f}"
-            )
+            agent_log(self.NAME, f"{symbol} HOLD — CALL={vote_call:.2f} PUT={vote_put:.2f}")
             return
 
         stake = self._risk.compute_stake(symbol, confidence)
         if stake is None:
             return
 
-        agent_log(
-            self.NAME,
-            f"🎯 GO: {symbol} {direction} | conf={confidence:.2f} | stake={stake}"
-        )
+        agent_log(self.NAME, f"🎯 GO: {symbol} {direction} | conf={confidence:.2f} | stake={stake}")
 
         await BUS.emit(Events.GO_SIGNAL, {
             "symbol":     symbol,

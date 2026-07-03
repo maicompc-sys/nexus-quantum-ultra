@@ -16,7 +16,7 @@ from websockets.exceptions import ConnectionClosed
 from core.event_bus import BUS, Events
 from utils.config   import (
     DERIV_APP_ID, DERIV_API_TOKEN,
-    DERIV_ACCOUNT_ID, SYMBOLS
+    DERIV_ACCOUNT_ID, DERIV_ACCOUNT_TYPE, SYMBOLS
 )
 from utils.logger   import agent_log
 
@@ -27,12 +27,13 @@ WS_PUBLIC    = "wss://api.derivws.com/trading/v1/options/ws/public"
 WS_DEMO_BASE = "wss://api.derivws.com/trading/v1/options/ws/demo"
 WS_REAL_BASE = "wss://api.derivws.com/trading/v1/options/ws/real"
 
-RECONNECT_DELAYS   = [2, 5, 10, 20, 40, 60]
-HEARTBEAT_INTERVAL = 20
-REQUEST_TIMEOUT    = 20.0
-PROPOSAL_TIMEOUT   = 12.0
-BUY_TIMEOUT        = 10.0
-OTP_REFRESH_MARGIN = 60     # renova OTP 60s antes de expirar
+RECONNECT_BASE_DELAY  = 2       # segundos iniciais entre tentativas
+RECONNECT_MAX_DELAY   = 60      # cap máximo de backoff
+HEARTBEAT_INTERVAL    = 20
+REQUEST_TIMEOUT       = 20.0
+PROPOSAL_TIMEOUT      = 12.0
+BUY_TIMEOUT           = 10.0
+OTP_REFRESH_MARGIN    = 60      # renova OTP 60s antes de expirar
 
 
 class DerivClient:
@@ -45,6 +46,7 @@ class DerivClient:
 
     def __init__(self, executor_agent=None):
         self._ws:             Optional[websockets.WebSocketClientProtocol] = None
+        self._listen_task:    Optional[asyncio.Task] = None   # referência forte
         self._running         = False
         self._connected       = False
         self._req_id          = 1
@@ -56,7 +58,7 @@ class DerivClient:
         self._ws_url:         Optional[str] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
 
-        self._tick_subs:   List[str] = list(SYMBOLS)
+        self._tick_subs:   List[str]  = list(SYMBOLS)
         self._candle_subs: List[Dict] = []
 
     # ══════════════════════════════════════════════════════════════
@@ -72,8 +74,7 @@ class DerivClient:
             agent_log("DERIV",
                 "DERIV_ACCOUNT_ID nao configurado no .env!\n"
                 "-> Encontre em: app.deriv.com -> seu loginid\n"
-                "   Demo:  VRTC123456\n"
-                "   Real:  CR123456",
+                "   Demo:  VRTC123456  |  Real:  CR123456",
                 logging.CRITICAL
             )
             return None
@@ -93,8 +94,8 @@ class DerivClient:
                 ) as resp:
                     if resp.status == 200:
                         body = await resp.json()
-                        data = body.get("data", body)   # ← igual
-                    
+                        data = body.get("data", body)
+
                         ws_url = (
                             data.get("url") or
                             data.get("ws_url") or
@@ -105,36 +106,31 @@ class DerivClient:
                             if otp:
                                 base   = WS_DEMO_BASE if account_type == "demo" else WS_REAL_BASE
                                 ws_url = f"{base}?otp={otp}"
-                    
+
                         if ws_url:
-                            # ── expires_at: usa valor real ou define 300s no futuro ──────────
                             raw_expires = body.get("data", {}).get("expires_at", 0)
                             if raw_expires and raw_expires > time.time():
-                                # É um timestamp Unix real
                                 self._otp_expires_at = float(raw_expires)
                             else:
-                                # Deriv não retorna expires_at — OTP dura ~5 min por padrão
                                 self._otp_expires_at = 0.0
 
                             agent_log("DERIV", f"OTP obtido | url={ws_url[:60]}...")
                             return ws_url
-                    
+
                         agent_log("DERIV", f"OTP response sem URL: {body}", logging.ERROR)
                         return None
 
                     elif resp.status == 401:
                         body = await resp.text()
                         agent_log("DERIV",
-                            f"401 Unauthorized — verifique DERIV_APP_ID e DERIV_API_TOKEN\n"
-                            f"Body: {body[:300]}",
+                            "401 Unauthorized — verifique DERIV_APP_ID e DERIV_API_TOKEN no .env",
                             logging.CRITICAL
                         )
                         return None
 
                     elif resp.status == 404:
                         agent_log("DERIV",
-                            f"404 — Account ID '{DERIV_ACCOUNT_ID}' nao encontrado.\n"
-                            f"Verifique DERIV_ACCOUNT_ID no .env",
+                            f"404 — Account ID nao encontrado. Verifique DERIV_ACCOUNT_ID no .env",
                             logging.CRITICAL
                         )
                         return None
@@ -155,8 +151,17 @@ class DerivClient:
     #  Connection
     # ══════════════════════════════════════════════════════════════
 
-    async def connect(self, account_type: str = "demo") -> bool:
-        for attempt, delay in enumerate(RECONNECT_DELAYS):
+    async def connect(self, account_type: str | None = None) -> bool:
+        """
+        Tenta conectar com backoff exponencial infinito (para 24/7).
+        account_type padrão lido do .env via DERIV_ACCOUNT_TYPE.
+        """
+        if account_type is None:
+            account_type = DERIV_ACCOUNT_TYPE
+
+        attempt = 0
+        while True:
+            delay = min(RECONNECT_BASE_DELAY * (2 ** min(attempt, 5)), RECONNECT_MAX_DELAY)
             try:
                 agent_log("DERIV", f"Obtendo OTP... (tentativa {attempt + 1})")
 
@@ -167,14 +172,19 @@ class DerivClient:
                 agent_log("DERIV", "Conectando ao WebSocket...")
                 self._ws = await websockets.connect(
                     ws_url,
-                    ping_interval    = 25,
-                    ping_timeout     = 15,
-                    close_timeout    = 10,
-                    max_size         = 2 ** 21,
+                    ping_interval = 25,
+                    ping_timeout  = 15,
+                    close_timeout = 10,
+                    max_size      = 2 ** 21,
                 )
                 self._ws_url = ws_url
 
-                asyncio.create_task(self._listen(), name="deriv_listener")
+                # Guarda referência forte na task de listener
+                if self._listen_task and not self._listen_task.done():
+                    self._listen_task.cancel()
+                self._listen_task = asyncio.create_task(
+                    self._listen(), name="deriv_listener"
+                )
                 await asyncio.sleep(0.5)
 
                 await self._subscribe_balance()
@@ -196,12 +206,13 @@ class DerivClient:
             except Exception as e:
                 agent_log("DERIV", f"Falha: {type(e).__name__}: {e}", logging.ERROR)
 
-            if attempt < len(RECONNECT_DELAYS) - 1:
-                agent_log("DERIV", f"Aguardando {delay}s...")
-                await asyncio.sleep(delay)
+            if not self._running:
+                agent_log("DERIV", "Sistema parado — abortando reconexão.")
+                return False
 
-        agent_log("DERIV", "Todas tentativas de conexao falharam.", logging.CRITICAL)
-        return False
+            agent_log("DERIV", f"Aguardando {delay}s antes de reconectar...")
+            await asyncio.sleep(delay)
+            attempt += 1
 
     # ══════════════════════════════════════════════════════════════
     #  Listener & Heartbeat
@@ -229,23 +240,17 @@ class DerivClient:
                 asyncio.create_task(self.connect(), name="deriv_reconnect")
 
     async def _heartbeat_loop(self) -> None:
-        import time
         while self._running and self._connected:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
-            # ── Verifica OTP apenas se expires_at foi definido ───────────
             if self._otp_expires_at > 0:
                 remaining = self._otp_expires_at - time.time()
-                agent_log("DERIV", f"OTP remaining: {remaining:.0f}s")   # debug temporário
-
-                if remaining < OTP_REFRESH_MARGIN:  # < 60s
+                if remaining < OTP_REFRESH_MARGIN:
                     agent_log("DERIV", "OTP expirando — renovando conexão...")
                     if self._ws:
                         await self._ws.close()
                     return
-            # Se expires_at == 0, NUNCA renova por OTP — só renova se WS cair
 
-            # ── Ping normal ───────────────────────────────────────────────
             try:
                 resp = await self._request({"ping": 1}, timeout=8.0)
                 if not resp:
@@ -261,7 +266,8 @@ class DerivClient:
     # ══════════════════════════════════════════════════════════════
 
     async def _dispatch(self, msg: Dict) -> None:
-        msg_type = msg.get("msg_type", "") or msg.get("type", "")
+        # Prioridade explícita: msg_type primeiro, type como fallback
+        msg_type = msg.get("msg_type") or msg.get("type", "")
         req_id   = msg.get("req_id")
 
         if req_id and req_id in self._pending:
@@ -326,20 +332,28 @@ class DerivClient:
                 agent_log("DERIV", f"API error [{code}]: {err}", logging.WARNING)
 
     # ══════════════════════════════════════════════════════════════
-    #  Request
+    #  Request — send_lock protege TODO o envio WS
     # ══════════════════════════════════════════════════════════════
 
     async def _request(self, payload: Dict, timeout: float = REQUEST_TIMEOUT) -> Optional[Dict]:
         if not self._ws:
             return None
+
+        # Lock protege incremento + envio para evitar race condition no WS
         async with self._send_lock:
-            rid           = self._req_id
-            self._req_id += 1
-        fut                = asyncio.get_event_loop().create_future()
-        self._pending[rid] = fut
-        payload["req_id"]  = rid
+            rid            = self._req_id
+            self._req_id  += 1
+            fut            = asyncio.get_running_loop().create_future()
+            self._pending[rid] = fut
+            payload["req_id"]  = rid
+            try:
+                await self._ws.send(json.dumps(payload))
+            except Exception as e:
+                self._pending.pop(rid, None)
+                agent_log("DERIV", f"Send error: {e}", logging.ERROR)
+                return None
+
         try:
-            await self._ws.send(json.dumps(payload))
             return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(rid, None)
@@ -486,8 +500,14 @@ class DerivClient:
             err = prop.get("error", {}).get("message", "timeout") if prop else "timeout"
             agent_log("DERIV", f"Proposal falhou: {err}", logging.ERROR)
             return None
-        p = prop.get("proposal", {})
-        return await self.buy(p.get("id"), float(p.get("ask_price", stake)))
+
+        proposal_id = prop.get("proposal", {}).get("id")
+        if not proposal_id:
+            agent_log("DERIV", "Proposal retornou sem 'id' — abortando buy", logging.ERROR)
+            return None
+
+        ask_price = float(prop.get("proposal", {}).get("ask_price", stake))
+        return await self.buy(proposal_id, ask_price)
 
     async def sell_contract(self, contract_id: int, price: float = 0) -> Optional[Dict]:
         return await self._request({"sell": contract_id, "price": price}, timeout=10.0)
@@ -514,11 +534,8 @@ class DerivClient:
         agent_log("DERIV", "DerivClient New API 2026 iniciando...")
         if not await self.connect():
             agent_log("DERIV",
-                "FALHA CRITICA. Verifique:\n"
-                "  1. DERIV_APP_ID   = 33ISwDNB3EpjDZMlwsDLW\n"
-                "  2. DERIV_API_TOKEN = pat_3191c5d0...8ddce2\n"
-                "  3. DERIV_ACCOUNT_ID = VRTCXXXXXX ou CRXXXXXX\n"
-                "  4. Conexao com internet",
+                "FALHA CRITICA na conexão Deriv. "
+                "Verifique DERIV_APP_ID, DERIV_API_TOKEN e DERIV_ACCOUNT_ID no .env",
                 logging.CRITICAL
             )
             await BUS.emit(Events.SYSTEM_STOP, {"reason": "deriv_connection_failed"})
@@ -531,5 +548,7 @@ class DerivClient:
         self._connected = False
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
+        if self._listen_task:
+            self._listen_task.cancel()
         if self._ws:
             asyncio.create_task(self._ws.close())

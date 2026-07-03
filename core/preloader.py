@@ -1,94 +1,184 @@
 """
-NEXUS QUANTUM ULTRA — Preloader
-Pré-carrega histórico massivo de velas via Deriv WS.
-Suporta carga incremental — só baixa o que está faltando no DB.
-
-New API obrigatório:
-  - adjust_start_time: 1  em todo ticks_history
-  - end: "latest" | epoch string
-  - máximo 5000 velas por request
+NEXUS QUANTUM ULTRA — Preloader (New API 2026)
+Pré-carrega histórico via OTP WebSocket.
+Modo incremental: só baixa o que falta no DB.
 """
 
 import asyncio
+import json
 import logging
-import time
-from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
+import aiohttp
 import websockets
+from websockets.exceptions import ConnectionClosed
 
-from core.event_bus  import BUS, Events
-from database.repository import (
+from core.event_bus       import BUS, Events
+from database.repository  import (
     save_candles_batch,
     get_latest_candle_epoch,
     get_candle_count,
 )
-from utils.config    import (
-    DERIV_WS_URL, DERIV_API_TOKEN,
+from utils.config  import (
+    DERIV_APP_ID, DERIV_API_TOKEN, DERIV_ACCOUNT_ID,
     SYMBOLS, PRELOAD_GRANULARITIES, PRELOAD_TARGET,
 )
-from utils.logger    import agent_log
+from utils.logger  import agent_log
+
+
+BATCH_SIZE       = 5000
+RATE_LIMIT_DELAY = 0.4
+SAVE_CHUNK_SIZE  = 1000
+REST_BASE        = "https://api.derivws.com"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-BATCH_SIZE       = 5000     # max per WS request (Deriv limit)
-RATE_LIMIT_DELAY = 0.5      # seconds between requests
-SAVE_CHUNK_SIZE  = 1000     # candles per DB write
-
 
 class PreloadSession:
-    """
-    Isolated WS session for preloading — avoids interfering with live trading WS.
-    """
+    """Sessão WS isolada para preload — não interfere com o DerivClient principal."""
 
     def __init__(self):
         self._ws       = None
         self._req_id   = 1
         self._pending: Dict[int, asyncio.Future] = {}
         self._lock     = asyncio.Lock()
+        self._alive    = False
+
+    # ── OTP ──────────────────────────────────────────────────────────────────
+
+    async def _get_otp_url(self) -> Optional[str]:
+        """REST POST /otp → URL WebSocket autenticada."""
+        if not DERIV_ACCOUNT_ID:
+            agent_log("PRELOAD",
+                "DERIV_ACCOUNT_ID não configurado!\n"
+                "→ Adicione no .env: DERIV_ACCOUNT_ID=DOT93171699",
+                logging.CRITICAL
+            )
+            return None
+
+        url = f"{REST_BASE}/trading/v1/options/accounts/{DERIV_ACCOUNT_ID}/otp"
+        headers = {
+            "Deriv-App-ID":  DERIV_APP_ID,
+            "Authorization": f"Bearer {DERIV_API_TOKEN}",
+            "Content-Type":  "application/json",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+
+                    if resp.status == 200:
+                        data   = await resp.json()
+                        ws_url = (
+                            data.get("url") or
+                            data.get("ws_url") or
+                            data.get("websocket_url")
+                        )
+                        if not ws_url:
+                            otp = data.get("otp") or data.get("token")
+                            if otp:
+                                ws_url = (
+                                    f"wss://api.derivws.com"
+                                    f"/trading/v1/options/ws/demo?otp={otp}"
+                                )
+                        if ws_url:
+                            agent_log("PRELOAD", "OTP obtido para sessão de preload")
+                            return ws_url
+                        agent_log("PRELOAD", f"OTP response inesperado: {data}", logging.ERROR)
+                        return None
+
+                    elif resp.status == 401:
+                        body = await resp.text()
+                        agent_log("PRELOAD",
+                            f"401 Unauthorized no preload OTP.\n"
+                            f"Verifique DERIV_APP_ID e DERIV_API_TOKEN.\n"
+                            f"Body: {body[:200]}",
+                            logging.ERROR
+                        )
+                        return None
+
+                    elif resp.status == 404:
+                        agent_log("PRELOAD",
+                            f"404 — DERIV_ACCOUNT_ID '{DERIV_ACCOUNT_ID}' inválido.",
+                            logging.ERROR
+                        )
+                        return None
+
+                    else:
+                        body = await resp.text()
+                        agent_log("PRELOAD", f"OTP HTTP {resp.status}: {body[:200]}", logging.ERROR)
+                        return None
+
+        except aiohttp.ClientError as e:
+            agent_log("PRELOAD", f"OTP network error: {e}", logging.ERROR)
+            return None
+        except Exception as e:
+            agent_log("PRELOAD", f"OTP exception: {e}", logging.ERROR)
+            return None
+
+    # ── Connect ───────────────────────────────────────────────────────────────
 
     async def connect(self) -> bool:
         try:
+            ws_url = await self._get_otp_url()
+            if not ws_url:
+                agent_log("PRELOAD", "Sessão de pré-carga falhou — OTP não obtido", logging.ERROR)
+                return False
+
             self._ws = await websockets.connect(
-                DERIV_WS_URL,
+                ws_url,
                 ping_interval = 30,
                 ping_timeout  = 20,
                 close_timeout = 10,
-                max_size      = 2 ** 22,    # 4MB — large candle batches
+                max_size      = 2 ** 22,    # 4MB para batches grandes
+                extra_headers = {
+                    "Deriv-App-ID": DERIV_APP_ID,
+                    "User-Agent":   "NexusQuantumUltra/2.0",
+                },
             )
+
+            self._alive = True
             asyncio.create_task(self._listen(), name="preload_listener")
-
-            # Authorize
-            resp = await self._request({"authorize": DERIV_API_TOKEN}, timeout=15.0)
-            if not resp or "error" in resp:
-                err = resp.get("error", {}).get("message", "timeout") if resp else "timeout"
-                agent_log("PRELOAD", f"Auth falhou: {err}", logging.ERROR)
-                return False
-
-            agent_log("PRELOAD", f"Sessão autorizada: {resp['authorize'].get('loginid','?')}")
+            await asyncio.sleep(0.3)
+            agent_log("PRELOAD", "[OK] Sessão de preload conectada")
             return True
 
         except Exception as e:
-            agent_log("PRELOAD", f"Conexão falhou: {e}", logging.ERROR)
+            agent_log("PRELOAD", f"Conexão falhou: {type(e).__name__}: {e}", logging.ERROR)
             return False
+
+    # ── Listener ──────────────────────────────────────────────────────────────
 
     async def _listen(self) -> None:
         try:
             async for raw in self._ws:
-                msg    = json_loads_safe(raw)
-                req_id = msg.get("req_id")
-                if req_id and req_id in self._pending:
-                    fut = self._pending.pop(req_id)
-                    if not fut.done():
-                        fut.set_result(msg)
-        except Exception:
-            # Fail all pending
+                try:
+                    msg    = json.loads(raw)
+                    req_id = msg.get("req_id")
+                    if req_id and req_id in self._pending:
+                        fut = self._pending.pop(req_id)
+                        if not fut.done():
+                            fut.set_result(msg)
+                except Exception:
+                    pass
+        except (ConnectionClosed, Exception):
+            pass
+        finally:
+            self._alive = False
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(ConnectionError("Preload WS fechado"))
             self._pending.clear()
 
-    async def _request(self, payload: Dict, timeout: float = 30.0) -> Optional[Dict]:
+    # ── Request ───────────────────────────────────────────────────────────────
+
+    async def _request(self, payload: Dict, timeout: float = 40.0) -> Optional[Dict]:
+        if not self._ws or not self._alive:
+            return None
+
         async with self._lock:
             rid           = self._req_id
             self._req_id += 1
@@ -98,15 +188,18 @@ class PreloadSession:
         payload["req_id"]  = rid
 
         try:
-            await self._ws.send(json_dumps(payload))
+            await self._ws.send(json.dumps(payload))
             return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(rid, None)
+            agent_log("PRELOAD", f"Timeout req={rid}", logging.WARNING)
             return None
         except Exception as e:
             self._pending.pop(rid, None)
             agent_log("PRELOAD", f"Request error: {e}", logging.WARNING)
             return None
+
+    # ── Fetch Candles ─────────────────────────────────────────────────────────
 
     async def fetch_candle_batch(
         self,
@@ -115,34 +208,25 @@ class PreloadSession:
         count:       int,
         end_epoch:   Optional[int] = None,
     ) -> Optional[List[Dict]]:
-        """
-        Fetch up to `count` candles ending at `end_epoch`.
-        New API requires adjust_start_time=1.
-        """
-        payload = {
+
+        resp = await self._request({
             "ticks_history":     symbol,
             "style":             "candles",
             "granularity":       granularity,
             "count":             min(count, BATCH_SIZE),
             "end":               str(end_epoch) if end_epoch else "latest",
-            "adjust_start_time": 1,          # ← New API obrigatório
-        }
-
-        resp = await self._request(payload, timeout=40.0)
+            "adjust_start_time": 1,
+        }, timeout=45.0)
 
         if not resp:
-            agent_log("PRELOAD", f"Timeout: {symbol}/{granularity}s", logging.WARNING)
             return None
 
         if "error" in resp:
             code = resp["error"].get("code",    "")
             msg  = resp["error"].get("message", "")
-
-            # Non-fatal errors
-            if code in ("NoDataFound", "MarketIsClosed"):
+            if code in ("NoDataFound", "MarketIsClosed", "InvalidSymbol"):
                 agent_log("PRELOAD", f"{symbol}: {msg} — pulando", logging.INFO)
                 return []
-
             agent_log("PRELOAD", f"Error [{code}]: {msg}", logging.ERROR)
             return None
 
@@ -162,38 +246,38 @@ class PreloadSession:
         ]
 
     async def close(self) -> None:
+        self._alive = False
         if self._ws:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Preloader:
-    """
-    Pré-carrega PRELOAD_TARGET velas por símbolo/granularidade.
-    Modo incremental: detecta onde o DB parou e continua de lá.
-    """
 
     def __init__(self):
         self._session: Optional[PreloadSession] = None
 
     async def run(self, incremental: bool = True) -> Dict:
-        agent_log("PRELOAD", "═" * 50)
+        agent_log("PRELOAD", "=" * 50)
         agent_log("PRELOAD", "Iniciando pré-carga de histórico...")
         agent_log("PRELOAD", f"Símbolos: {SYMBOLS}")
         agent_log("PRELOAD", f"Granularidades: {PRELOAD_GRANULARITIES}")
         agent_log("PRELOAD", f"Alvo por série: {PRELOAD_TARGET:,} velas")
-        agent_log("PRELOAD", "═" * 50)
+        agent_log("PRELOAD", "=" * 50)
 
         self._session = PreloadSession()
         if not await self._session.connect():
-            agent_log("PRELOAD", "Sessão de pré-carga falhou", logging.ERROR)
+            agent_log("PRELOAD", "Erro: Sessão de pré-carga falhou", logging.ERROR)
             return {}
 
-        total_candles    = 0
-        total_series     = len(SYMBOLS) * len(PRELOAD_GRANULARITIES)
-        completed        = 0
-        results          = {}
+        total_candles = 0
+        total_series  = len(SYMBOLS) * len(PRELOAD_GRANULARITIES)
+        completed     = 0
+        results       = {}
 
         for symbol in SYMBOLS:
             results[symbol] = {}
@@ -212,7 +296,7 @@ class Preloader:
                     pct = int(completed / total_series * 100)
                     agent_log("PRELOAD",
                         f"[{completed}/{total_series}] {series_key}: "
-                        f"+{count:,} velas | Total: {total_candles:,}"
+                        f"+{count:,} | Total: {total_candles:,} | {pct}%"
                     )
 
                     await BUS.emit("preload.progress", {
@@ -232,9 +316,9 @@ class Preloader:
 
         await self._session.close()
 
-        agent_log("PRELOAD", "═" * 50)
-        agent_log("PRELOAD", f"✅ Pré-carga concluída: {total_candles:,} velas")
-        agent_log("PRELOAD", "═" * 50)
+        agent_log("PRELOAD", "=" * 50)
+        agent_log("PRELOAD", f"[OK] Pré-carga concluída: {total_candles:,} velas")
+        agent_log("PRELOAD", "=" * 50)
 
         await BUS.emit(Events.PRELOAD_ALL, {
             "total_candles": total_candles,
@@ -249,38 +333,27 @@ class Preloader:
         granularity: int,
         incremental: bool,
     ) -> int:
-        """
-        Carrega uma série completa (symbol + granularity).
-        Retorna quantidade de velas novas salvas.
-        """
-        # ── Incremental: check what we already have ───────────────────────
-        existing_count = 0
-        latest_epoch   = None
 
+        # ── Incremental check ──────────────────────────────────────────
         if incremental:
-            existing_count = await get_candle_count(symbol, granularity)
-            latest_epoch   = await get_latest_candle_epoch(symbol, granularity)
-
-            remaining = PRELOAD_TARGET - existing_count
+            existing = await get_candle_count(symbol, granularity)
+            remaining = PRELOAD_TARGET - existing
             if remaining <= 0:
-                agent_log("PRELOAD",
-                    f"{symbol}/{granularity}s: já tem {existing_count:,} — pulando"
-                )
+                agent_log("PRELOAD", f"{symbol}/{granularity}s: completo ({existing:,}) — skip")
                 return 0
-
             target = remaining
             agent_log("PRELOAD",
-                f"{symbol}/{granularity}s: tem {existing_count:,}, "
+                f"{symbol}/{granularity}s: tem {existing:,}, "
                 f"baixando {target:,} faltantes..."
             )
         else:
             target = PRELOAD_TARGET
 
-        # ── Fetch in batches walking backwards ────────────────────────────
-        total_saved  = 0
-        end_epoch    = latest_epoch    # None = "latest" on first call
-        retries      = 0
-        max_retries  = 3
+        # ── Fetch backwards ────────────────────────────────────────────
+        total_saved = 0
+        end_epoch   = None
+        retries     = 0
+        max_retries = 3
 
         while total_saved < target:
             batch_size = min(BATCH_SIZE, target - total_saved)
@@ -292,7 +365,7 @@ class Preloader:
                 end_epoch   = end_epoch,
             )
 
-            # Retry logic
+            # Retry
             if candles is None:
                 retries += 1
                 if retries >= max_retries:
@@ -307,44 +380,26 @@ class Preloader:
             retries = 0
 
             if not candles:
-                break    # No more data available
+                break   # Sem mais dados
 
-            # ── Save in chunks ────────────────────────────────────────────
+            # ── Salva em chunks ────────────────────────────────────────
             for i in range(0, len(candles), SAVE_CHUNK_SIZE):
                 chunk = candles[i:i + SAVE_CHUNK_SIZE]
                 saved = await save_candles_batch(chunk)
                 total_saved += saved
 
-            # ── Walk backwards: next end = oldest epoch - 1 ──────────────
-            oldest_epoch = min(c["epoch"] for c in candles)
-            if end_epoch and oldest_epoch >= end_epoch:
-                break    # No progress — avoid infinite loop
+            # ── Caminha para trás ──────────────────────────────────────
+            oldest = min(c["epoch"] for c in candles)
+            if end_epoch and oldest >= end_epoch:
+                break   # Sem progresso
 
-            end_epoch = oldest_epoch - 1
+            end_epoch = oldest - 1
 
-            # Rate limiting
             await asyncio.sleep(RATE_LIMIT_DELAY)
 
-            # Log progress
             if total_saved % 5000 == 0 and total_saved > 0:
                 agent_log("PRELOAD",
-                    f"  {symbol}/{granularity}s: {total_saved:,}/{target:,} velas"
+                    f"  {symbol}/{granularity}s: {total_saved:,}/{target:,}"
                 )
 
         return total_saved
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-import json
-
-def json_loads_safe(raw: str) -> Dict:
-    try:
-        return json.loads(raw)
-    except Exception:
-        return {}
-
-def json_dumps(obj) -> str:
-    return json.dumps(obj)

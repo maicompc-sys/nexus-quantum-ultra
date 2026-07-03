@@ -92,17 +92,19 @@ class DerivClient:
                     timeout=aiohttp.ClientTimeout(total=15)
                 ) as resp:
                     if resp.status == 200:
-                        data   = await resp.json()
+                        data  = await resp.json()
+                        # Response: {"data": {"url": "wss://..."}, "meta": {...}}
+                        inner = data.get("data", data)
                         ws_url = (
-                            data.get("url")
-                            or data.get("ws_url")
-                            or data.get("websocket_url")
+                            inner.get("url")
+                            or inner.get("ws_url")
+                            or inner.get("websocket_url")
+                            or data.get("url")
                         )
-                        expires = data.get("expires_at", 0)
+                        expires = inner.get("expires_at", data.get("expires_at", 0))
 
                         if not ws_url:
-                            # Alguns responses retornam so o OTP
-                            otp = data.get("otp") or data.get("token")
+                            otp = inner.get("otp") or inner.get("token")
                             if otp:
                                 base   = WS_DEMO_BASE if account_type == "demo" else WS_REAL_BASE
                                 ws_url = f"{base}?otp={otp}"
@@ -160,11 +162,11 @@ class DerivClient:
                 agent_log("DERIV", "Conectando ao WebSocket...")
                 self._ws = await websockets.connect(
                     ws_url,
-                    ping_interval = 25,
-                    ping_timeout  = 15,
-                    close_timeout = 10,
-                    max_size      = 2 ** 21,
-                    extra_headers = {
+                    ping_interval    = 25,
+                    ping_timeout     = 15,
+                    close_timeout    = 10,
+                    max_size         = 2 ** 21,
+                    additional_headers = {
                         "Deriv-App-ID": DERIV_APP_ID,
                         "User-Agent":   "NexusQuantumUltra/2.0",
                     },

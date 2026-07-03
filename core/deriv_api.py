@@ -1,92 +1,178 @@
 """
-NEXUS QUANTUM ULTRA — Deriv WebSocket Client (New API)
-Usa OAuth 2.0 — App registrado em developers.deriv.com
-WebSocket: wss://ws.derivws.com/websockets/v3?app_id=<APP_ID>
-
-Diferenças New API vs Legacy:
-  - App ID alfanumérico (mas WS URL ainda usa o ID numérico do OAuth app)
-  - proposal usa "symbol" (igual Legacy no WS)
-  - buy/sell igual
-  - balance: sem multi-account
-  - ticks_history: adjust_start_time obrigatório
+NEXUS QUANTUM ULTRA — Deriv Client (New API 2026)
+Fluxo: REST OTP -> WebSocket autenticado
+Docs: developers.deriv.com/docs/intro/api-overview
 """
 
 import asyncio
 import json
 import logging
 import time
-from typing import Dict, List, Optional
-
+import aiohttp
 import websockets
-from websockets.exceptions import (
-    ConnectionClosed,
-    ConnectionClosedError,
-    ConnectionClosedOK,
-)
+from typing import Dict, List, Optional
+from websockets.exceptions import ConnectionClosed
 
 from core.event_bus import BUS, Events
-from utils.config   import DERIV_WS_URL, DERIV_API_TOKEN, DERIV_APP_ID, SYMBOLS
+from utils.config   import (
+    DERIV_APP_ID, DERIV_API_TOKEN,
+    DERIV_ACCOUNT_ID, SYMBOLS
+)
 from utils.logger   import agent_log
 
+
+# ── Endpoints ──────────────────────────────────────────────────────────────
+REST_BASE    = "https://api.derivws.com"
+WS_PUBLIC    = "wss://api.derivws.com/trading/v1/options/ws/public"
+WS_DEMO_BASE = "wss://api.derivws.com/trading/v1/options/ws/demo"
+WS_REAL_BASE = "wss://api.derivws.com/trading/v1/options/ws/real"
 
 RECONNECT_DELAYS   = [2, 5, 10, 20, 40, 60]
 HEARTBEAT_INTERVAL = 20
 REQUEST_TIMEOUT    = 20.0
 PROPOSAL_TIMEOUT   = 12.0
 BUY_TIMEOUT        = 10.0
+OTP_REFRESH_MARGIN = 60     # renova OTP 60s antes de expirar
 
 
 class DerivClient:
     """
-    Deriv WebSocket Client — New API (OAuth app).
-
-    Auth flow:
-      1. Connect to wss://ws.derivws.com/websockets/v3?app_id=<ID>
-      2. Send {"authorize": "<API_TOKEN>"}
-      3. Token gerado em: app.deriv.com → API tokens
-         Scopes: Read + Trade
-
-    New API app criado em:
-      developers.deriv.com → Dashboard → Register application
+    New Deriv API 2026:
+      1. REST POST /otp  -> recebe WS URL com OTP
+      2. Conecta na WS URL retornada
+      3. Opera normalmente
     """
 
     def __init__(self, executor_agent=None):
-        self._ws:            Optional[websockets.WebSocketClientProtocol] = None
-        self._running        = False
-        self._authorized     = False
-        self._req_id         = 1
-        self._pending:       Dict[int, asyncio.Future] = {}
-        self._executor       = executor_agent
-        self._send_lock      = asyncio.Lock()
-        self._account_info:  Dict = {}
+        self._ws:             Optional[websockets.WebSocketClientProtocol] = None
+        self._running         = False
+        self._connected       = False
+        self._req_id          = 1
+        self._pending:        Dict[int, asyncio.Future] = {}
+        self._executor        = executor_agent
+        self._send_lock       = asyncio.Lock()
+        self._account_info:   Dict = {}
+        self._otp_expires_at  = 0.0
+        self._ws_url:         Optional[str] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
 
         self._tick_subs:   List[str] = list(SYMBOLS)
         self._candle_subs: List[Dict] = []
 
     # ══════════════════════════════════════════════════════════════
+    #  OTP — pega URL WebSocket autenticada via REST
+    # ══════════════════════════════════════════════════════════════
+
+    async def _get_otp_url(self, account_type: str = "demo") -> Optional[str]:
+        """
+        POST /trading/v1/options/accounts/{accountId}/otp
+        Retorna URL WS com OTP embutido.
+        """
+        if not DERIV_ACCOUNT_ID:
+            agent_log("DERIV",
+                "DERIV_ACCOUNT_ID nao configurado no .env!\n"
+                "-> Encontre em: app.deriv.com -> seu loginid\n"
+                "   Demo:  VRTC123456\n"
+                "   Real:  CR123456",
+                logging.CRITICAL
+            )
+            return None
+
+        url     = f"{REST_BASE}/trading/v1/options/accounts/{DERIV_ACCOUNT_ID}/otp"
+        headers = {
+            "Deriv-App-ID":  DERIV_APP_ID,
+            "Authorization": f"Bearer {DERIV_API_TOKEN}",
+            "Content-Type":  "application/json",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    if resp.status == 200:
+                        data   = await resp.json()
+                        ws_url = (
+                            data.get("url")
+                            or data.get("ws_url")
+                            or data.get("websocket_url")
+                        )
+                        expires = data.get("expires_at", 0)
+
+                        if not ws_url:
+                            # Alguns responses retornam so o OTP
+                            otp = data.get("otp") or data.get("token")
+                            if otp:
+                                base   = WS_DEMO_BASE if account_type == "demo" else WS_REAL_BASE
+                                ws_url = f"{base}?otp={otp}"
+
+                        if ws_url:
+                            self._otp_expires_at = float(expires) if expires else 0.0
+                            agent_log("DERIV", f"OTP obtido | expires_at={expires}")
+                            return ws_url
+
+                        agent_log("DERIV", f"OTP response sem URL: {data}", logging.ERROR)
+                        return None
+
+                    elif resp.status == 401:
+                        body = await resp.text()
+                        agent_log("DERIV",
+                            f"401 Unauthorized — verifique DERIV_APP_ID e DERIV_API_TOKEN\n"
+                            f"Body: {body[:300]}",
+                            logging.CRITICAL
+                        )
+                        return None
+
+                    elif resp.status == 404:
+                        agent_log("DERIV",
+                            f"404 — Account ID '{DERIV_ACCOUNT_ID}' nao encontrado.\n"
+                            f"Verifique DERIV_ACCOUNT_ID no .env",
+                            logging.CRITICAL
+                        )
+                        return None
+
+                    else:
+                        body = await resp.text()
+                        agent_log("DERIV", f"OTP HTTP {resp.status}: {body[:200]}", logging.ERROR)
+                        return None
+
+        except aiohttp.ClientError as e:
+            agent_log("DERIV", f"OTP request falhou: {e}", logging.ERROR)
+            return None
+        except Exception as e:
+            agent_log("DERIV", f"OTP exception: {e}", logging.ERROR)
+            return None
+
+    # ══════════════════════════════════════════════════════════════
     #  Connection
     # ══════════════════════════════════════════════════════════════
 
-    async def connect(self) -> bool:
+    async def connect(self, account_type: str = "demo") -> bool:
         for attempt, delay in enumerate(RECONNECT_DELAYS):
             try:
-                agent_log("DERIV", f"Conectando... tentativa {attempt + 1}")
+                agent_log("DERIV", f"Obtendo OTP... (tentativa {attempt + 1})")
 
+                ws_url = await self._get_otp_url(account_type)
+                if not ws_url:
+                    raise ConnectionError("Falha ao obter OTP URL")
+
+                agent_log("DERIV", "Conectando ao WebSocket...")
                 self._ws = await websockets.connect(
-                    DERIV_WS_URL,
+                    ws_url,
                     ping_interval = 25,
                     ping_timeout  = 15,
                     close_timeout = 10,
                     max_size      = 2 ** 21,
-                    extra_headers = {"User-Agent": "NexusQuantumUltra/2.0"},
+                    extra_headers = {
+                        "Deriv-App-ID": DERIV_APP_ID,
+                        "User-Agent":   "NexusQuantumUltra/2.0",
+                    },
                 )
+                self._ws_url = ws_url
 
                 asyncio.create_task(self._listen(), name="deriv_listener")
-
-                if not await self._authorize():
-                    await self._ws.close()
-                    raise ConnectionError("Autorização falhou")
+                await asyncio.sleep(0.5)
 
                 await self._subscribe_balance()
                 await self._resubscribe_ticks()
@@ -97,15 +183,13 @@ class DerivClient:
                     self._heartbeat_loop(), name="deriv_heartbeat"
                 )
 
-                agent_log("DERIV",
-                    f"✅ Conectado | {self._account_info.get('loginid','?')} | "
-                    f"{'DEMO' if self._account_info.get('is_virtual') else 'REAL'}"
-                )
+                self._connected = True
+                agent_log("DERIV", f"Conectado via New API 2026 | {account_type.upper()}")
                 await BUS.emit(Events.AGENT_STATUS, {"agent": "DERIV", "status": "running"})
                 return True
 
             except ConnectionError as e:
-                agent_log("DERIV", f"❌ {e}", logging.ERROR)
+                agent_log("DERIV", f"Erro: {e}", logging.ERROR)
             except Exception as e:
                 agent_log("DERIV", f"Falha: {type(e).__name__}: {e}", logging.ERROR)
 
@@ -113,61 +197,8 @@ class DerivClient:
                 agent_log("DERIV", f"Aguardando {delay}s...")
                 await asyncio.sleep(delay)
 
-        agent_log("DERIV", "Todas tentativas falharam.", logging.CRITICAL)
+        agent_log("DERIV", "Todas tentativas de conexao falharam.", logging.CRITICAL)
         return False
-
-    async def _authorize(self) -> bool:
-        if not DERIV_API_TOKEN:
-            agent_log("DERIV", "DERIV_API_TOKEN ausente no .env", logging.CRITICAL)
-            return False
-
-        resp = await self._request({"authorize": DERIV_API_TOKEN}, timeout=15.0)
-
-        if not resp:
-            agent_log("DERIV", "Timeout na autorização", logging.ERROR)
-            return False
-
-        if "error" in resp:
-            code = resp["error"].get("code",    "")
-            msg  = resp["error"].get("message", "")
-            agent_log("DERIV", f"Auth error [{code}]: {msg}", logging.CRITICAL)
-
-            hints = {
-                "InvalidAppID":   "Verifique DERIV_APP_ID no .env",
-                "InvalidToken":   "Gere novo token: app.deriv.com → API tokens",
-                "RateLimit":      "Aguarde e tente novamente",
-                "DisabledClient": "Conta desabilitada",
-            }
-            if code in hints:
-                agent_log("DERIV", f"→ {hints[code]}", logging.CRITICAL)
-            return False
-
-        auth = resp.get("authorize", {})
-        self._account_info = {
-            "loginid":    auth.get("loginid",    "?"),
-            "balance":    float(auth.get("balance", 0)),
-            "currency":   auth.get("currency",   "USD"),
-            "is_virtual": bool(auth.get("is_virtual", 1)),
-            "scopes":     auth.get("scopes",     []),
-        }
-
-        # Validate required scopes
-        scopes = self._account_info["scopes"]
-        missing = [s for s in ["read", "trade"] if s not in scopes]
-        if missing:
-            agent_log("DERIV",
-                f"Token sem scopes: {missing}. "
-                f"Regenere com: Read + Trade",
-                logging.CRITICAL
-            )
-            return False
-
-        self._authorized = True
-        await BUS.emit(Events.BALANCE_UPDATE, {
-            "balance":  self._account_info["balance"],
-            "currency": self._account_info["currency"],
-        })
-        return True
 
     # ══════════════════════════════════════════════════════════════
     #  Listener & Heartbeat
@@ -180,12 +211,12 @@ class DerivClient:
                     await self._dispatch(json.loads(raw))
                 except Exception as e:
                     agent_log("DERIV", f"Dispatch error: {e}", logging.ERROR)
-        except (ConnectionClosed, ConnectionClosedOK, ConnectionClosedError) as e:
+        except ConnectionClosed as e:
             agent_log("DERIV", f"WS fechado: {e}", logging.WARNING)
         except Exception as e:
             agent_log("DERIV", f"Listener error: {e}", logging.ERROR)
         finally:
-            self._authorized = False
+            self._connected = False
             for fut in self._pending.values():
                 if not fut.done():
                     fut.set_exception(ConnectionError("WS desconectado"))
@@ -195,12 +226,22 @@ class DerivClient:
                 asyncio.create_task(self.connect(), name="deriv_reconnect")
 
     async def _heartbeat_loop(self) -> None:
-        while self._running and self._authorized:
+        while self._running and self._connected:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+            # Renova OTP antes de expirar
+            if self._otp_expires_at > 0:
+                remaining = self._otp_expires_at - time.time()
+                if remaining < OTP_REFRESH_MARGIN:
+                    agent_log("DERIV", "OTP expirando — renovando conexao...")
+                    if self._ws:
+                        await self._ws.close()
+                    return
+
             try:
                 resp = await self._request({"ping": 1}, timeout=8.0)
-                if not resp or resp.get("ping") != "pong":
-                    agent_log("DERIV", "Heartbeat falhou", logging.WARNING)
+                if not resp:
+                    agent_log("DERIV", "Heartbeat sem resposta", logging.WARNING)
                     if self._ws:
                         await self._ws.close()
                     break
@@ -212,10 +253,9 @@ class DerivClient:
     # ══════════════════════════════════════════════════════════════
 
     async def _dispatch(self, msg: Dict) -> None:
-        msg_type = msg.get("msg_type", "")
+        msg_type = msg.get("msg_type", "") or msg.get("type", "")
         req_id   = msg.get("req_id")
 
-        # Resolve pending future
         if req_id and req_id in self._pending:
             fut = self._pending.pop(req_id)
             if not fut.done():
@@ -267,42 +307,35 @@ class DerivClient:
 
         elif msg_type == "buy" and "error" in msg:
             code = msg["error"].get("code",    "")
-            err  = msg["error"].get("message", "unknown")
-            agent_log("DERIV", f"Buy stream error [{code}]: {err}", logging.ERROR)
+            err  = msg["error"].get("message", "")
+            agent_log("DERIV", f"Buy error [{code}]: {err}", logging.ERROR)
             await BUS.emit(Events.TRADE_ERROR, {"reason": err, "code": code})
 
         elif "error" in msg:
             code = msg["error"].get("code",    "")
             err  = msg["error"].get("message", "")
-            if code not in ("MarketIsClosed", "TooManyRequests", "AlreadySubscribed"):
+            if code not in ("MarketIsClosed", "AlreadySubscribed"):
                 agent_log("DERIV", f"API error [{code}]: {err}", logging.WARNING)
 
     # ══════════════════════════════════════════════════════════════
     #  Request
     # ══════════════════════════════════════════════════════════════
 
-    async def _request(
-        self,
-        payload: Dict,
-        timeout: float = REQUEST_TIMEOUT,
-    ) -> Optional[Dict]:
+    async def _request(self, payload: Dict, timeout: float = REQUEST_TIMEOUT) -> Optional[Dict]:
         if not self._ws:
             return None
-
         async with self._send_lock:
-            rid            = self._req_id
-            self._req_id  += 1
-
+            rid           = self._req_id
+            self._req_id += 1
         fut                = asyncio.get_event_loop().create_future()
         self._pending[rid] = fut
         payload["req_id"]  = rid
-
         try:
             await self._ws.send(json.dumps(payload))
             return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(rid, None)
-            agent_log("DERIV", f"Timeout req={rid} {list(payload.keys())}", logging.WARNING)
+            agent_log("DERIV", f"Timeout req={rid}", logging.WARNING)
             return None
         except Exception as e:
             self._pending.pop(rid, None)
@@ -315,12 +348,7 @@ class DerivClient:
 
     async def _resubscribe_ticks(self) -> None:
         for symbol in self._tick_subs:
-            resp = await self._request({"ticks": symbol, "subscribe": 1}, timeout=10.0)
-            if resp and "error" in resp:
-                agent_log("DERIV",
-                    f"Tick sub error {symbol}: {resp['error'].get('message')}",
-                    logging.WARNING
-                )
+            await self._request({"ticks": symbol, "subscribe": 1}, timeout=10.0)
             await asyncio.sleep(0.15)
 
     async def _subscribe_balance(self) -> None:
@@ -333,17 +361,12 @@ class DerivClient:
             "granularity":       granularity,
             "subscribe":         1,
             "count":             1,
-            "adjust_start_time": 1,      # ← obrigatório New API
+            "adjust_start_time": 1,
         }, timeout=12.0)
-        ok = resp is not None and "error" not in resp
-        if ok:
-            entry = {"symbol": symbol, "granularity": granularity}
-            if entry not in self._candle_subs:
-                self._candle_subs.append(entry)
-        return ok
+        return resp is not None and "error" not in resp
 
     # ══════════════════════════════════════════════════════════════
-    #  Data Fetching
+    #  Data
     # ══════════════════════════════════════════════════════════════
 
     async def fetch_candles(
@@ -353,18 +376,15 @@ class DerivClient:
         count:       int = 500,
         end:         Optional[int] = None,
     ) -> Optional[List[Dict]]:
-        payload = {
+        resp = await self._request({
             "ticks_history":     symbol,
             "style":             "candles",
             "granularity":       granularity,
             "count":             min(count, 5000),
             "end":               str(end) if end else "latest",
-            "adjust_start_time": 1,          # ← obrigatório New API
-        }
-        resp = await self._request(payload, timeout=30.0)
+            "adjust_start_time": 1,
+        }, timeout=30.0)
         if not resp or "error" in resp:
-            err = resp.get("error", {}).get("message", "timeout") if resp else "timeout"
-            agent_log("DERIV", f"fetch_candles {symbol}: {err}", logging.WARNING)
             return None
         return [
             {
@@ -396,7 +416,7 @@ class DerivClient:
         ]
 
     # ══════════════════════════════════════════════════════════════
-    #  Trading — New API
+    #  Trading
     # ══════════════════════════════════════════════════════════════
 
     async def proposal(
@@ -407,16 +427,11 @@ class DerivClient:
         duration:      int   = 5,
         duration_unit: str   = "t",
         currency:      str   = "USD",
-        basis:         str   = "stake",
     ) -> Optional[Dict]:
-        """
-        New API WebSocket usa "symbol" igual à Legacy.
-        "underlying_symbol" existe apenas na REST API nova.
-        """
         return await self._request({
             "proposal":      1,
             "amount":        round(float(stake), 2),
-            "basis":         basis,
+            "basis":         "stake",
             "contract_type": contract_type,
             "currency":      currency,
             "duration":      duration,
@@ -429,21 +444,20 @@ class DerivClient:
             "buy":   proposal_id,
             "price": round(float(price), 2),
         }, timeout=BUY_TIMEOUT)
-
         if not resp:
             return None
         if "error" in resp:
-            code = resp["error"].get("code",    "")
-            msg  = resp["error"].get("message", "")
-            agent_log("DERIV", f"Buy rejeitado [{code}]: {msg}", logging.ERROR)
+            agent_log("DERIV",
+                f"Buy rejeitado [{resp['error'].get('code')}]: "
+                f"{resp['error'].get('message')}",
+                logging.ERROR
+            )
             return resp
         if "buy" not in resp:
-            agent_log("DERIV", "Resposta sem objeto 'buy'", logging.ERROR)
             return None
-
         b = resp["buy"]
         agent_log("DERIV",
-            f"✅ Buy OK | contract={b.get('contract_id')} | "
+            f"Buy OK | contract={b.get('contract_id')} | "
             f"price={b.get('buy_price')} | payout={b.get('payout')}"
         )
         return resp
@@ -456,7 +470,6 @@ class DerivClient:
         duration:      int = 5,
         duration_unit: str = "t",
     ) -> Optional[Dict]:
-        """Proposal + Buy em uma chamada."""
         prop = await self.proposal(
             symbol=symbol, contract_type=contract_type,
             stake=stake, duration=duration, duration_unit=duration_unit,
@@ -465,7 +478,6 @@ class DerivClient:
             err = prop.get("error", {}).get("message", "timeout") if prop else "timeout"
             agent_log("DERIV", f"Proposal falhou: {err}", logging.ERROR)
             return None
-
         p = prop.get("proposal", {})
         return await self.buy(p.get("id"), float(p.get("ask_price", stake)))
 
@@ -484,21 +496,21 @@ class DerivClient:
     # ══════════════════════════════════════════════════════════════
 
     def is_connected(self) -> bool:
-        return self._ws is not None and self._authorized
+        return self._ws is not None and self._connected
 
     def get_account_info(self) -> Dict:
         return dict(self._account_info)
 
     async def run(self) -> None:
         self._running = True
-        agent_log("DERIV", "DerivClient (New API) iniciando...")
+        agent_log("DERIV", "DerivClient New API 2026 iniciando...")
         if not await self.connect():
             agent_log("DERIV",
-                "FALHA CRÍTICA.\n"
-                "Verifique:\n"
-                "  1. DERIV_APP_ID = ID numérico do app registrado\n"
-                "  2. DERIV_API_TOKEN = token com scopes Read + Trade\n"
-                "  3. Conexão com internet",
+                "FALHA CRITICA. Verifique:\n"
+                "  1. DERIV_APP_ID   = 33ISwDNB3EpjDZMlwsDLW\n"
+                "  2. DERIV_API_TOKEN = pat_3191c5d0...8ddce2\n"
+                "  3. DERIV_ACCOUNT_ID = VRTCXXXXXX ou CRXXXXXX\n"
+                "  4. Conexao com internet",
                 logging.CRITICAL
             )
             await BUS.emit(Events.SYSTEM_STOP, {"reason": "deriv_connection_failed"})
@@ -507,8 +519,8 @@ class DerivClient:
             await asyncio.sleep(1)
 
     def stop(self) -> None:
-        self._running    = False
-        self._authorized = False
+        self._running   = False
+        self._connected = False
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
         if self._ws:

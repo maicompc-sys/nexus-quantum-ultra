@@ -4,10 +4,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Deriv New API ───────────────────────────────────────────────────────────
-DERIV_APP_ID    = os.getenv("DERIV_APP_ID",    "")
-DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")
-DERIV_WS_URL    = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+# ── Deriv New API 2026 ──────────────────────────────────────────────────────
+DERIV_APP_ID     = os.getenv("DERIV_APP_ID",     "")
+DERIV_API_TOKEN  = os.getenv("DERIV_API_TOKEN",  "")
+DERIV_ACCOUNT_ID = os.getenv("DERIV_ACCOUNT_ID", "")   # loginid: VRTCXXXXXX ou CRXXXXXX
+
+# URL WS construida dinamicamente (compatibilidade com preloader Legacy)
+DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 
 # ── Símbolos e granularidades ───────────────────────────────────────────────
 SYMBOLS = [

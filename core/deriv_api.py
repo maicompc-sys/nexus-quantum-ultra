@@ -114,7 +114,7 @@ class DerivClient:
                                 self._otp_expires_at = float(raw_expires)
                             else:
                                 # Deriv não retorna expires_at — OTP dura ~5 min por padrão
-                                self._otp_expires_at = time.time() + 300.0
+                                self._otp_expires_at = 0.0
 
                             agent_log("DERIV", f"OTP obtido | url={ws_url[:60]}...")
                             return ws_url

@@ -63,7 +63,7 @@ class SentinelAgent:
         if old_regime != regime:
             agent_log(
                 self.NAME,
-                f"{symbol} regime: {old_regime} → {regime} | "
+                f"{symbol} regime: {old_regime} -> {regime} | "
                 f"ATR={current_atr:.5f} | RSI={current_rsi:.1f} | "
                 f"{'✓ LIBERADO' if allowed else '✗ BLOQUEADO'}"
             )

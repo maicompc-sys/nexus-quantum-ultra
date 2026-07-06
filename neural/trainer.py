@@ -86,7 +86,7 @@ class NeuralTrainer:
             agent_log(self.NAME, "Dataset vazio — treino abortado", logging.WARNING)
             return
 
-        X, y = await dataset
+        X, y = dataset   # já é uma tupla, não uma coroutine
         if len(X) < 100:
             agent_log(self.NAME, f"Amostras insuficientes: {len(X)}", logging.WARNING)
             return
@@ -118,6 +118,9 @@ class NeuralTrainer:
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
             scheduler.step()
+            
+            # Ceder controle ao loop de eventos principal para não travar os websockets e agentes
+            await asyncio.sleep(0.01)
 
             # ── Validate ───────────────────────────────────────────────────
             model.eval()
@@ -212,7 +215,24 @@ class NeuralTrainer:
             await BUS.emit(Events.NN_RETRAIN, {"reason": "initial"})
 
         while self._running:
-            await asyncio.sleep(60)
+            # Emitir predições para a arbitragem
+            if self._model is not None:
+                for symbol in SYMBOLS:
+                    try:
+                        candles = await get_candles(symbol, 60, limit=NN_LOOKBACK+50)
+                        res = self.predict(candles)
+                        if res["signal"] in ["CALL", "PUT", "HOLD"]:
+                            await BUS.emit(Events.AGENT_SIGNAL, {
+                                "agent":      self.NAME,
+                                "symbol":     symbol,
+                                "signal":     res["signal"],
+                                "confidence": res["confidence"],
+                                "data":       {"probas": res["probas"]},
+                            })
+                    except Exception as e:
+                        agent_log(self.NAME, f"Erro ao prever {symbol}: {e}", logging.ERROR)
+            
+            await asyncio.sleep(10)  # Prever a cada 10 segundos
 
     def stop(self):
         self._running = False

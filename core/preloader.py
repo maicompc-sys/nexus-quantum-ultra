@@ -81,9 +81,12 @@ class PreloadSession:
                         if not ws_url:
                             otp = data.get("otp") or data.get("token")
                             if otp:
+                                # Detecta demo vs real pelo prefixo do Account ID
+                                is_demo = DERIV_ACCOUNT_ID.upper().startswith("VRT")
+                                account_path = "demo" if is_demo else "real"
                                 ws_url = (
                                     f"wss://api.derivws.com"
-                                    f"/trading/v1/options/ws/demo?otp={otp}"
+                                    f"/trading/v1/options/ws/{account_path}?otp={otp}"
                                 )
                         if ws_url:
                             agent_log("PRELOAD", "OTP obtido para sessão de preload")

@@ -31,9 +31,11 @@ GROQ_KEYS = [
 ]
 
 # Modelos por agente do conclave (round-robin de chaves)
-GROQ_MODEL_A = os.getenv("GROQ_MODEL_A", "llama-3.3-70b-versatile")   # Estrategista
-GROQ_MODEL_B = os.getenv("GROQ_MODEL_B", "mixtral-8x7b-32768")        # Analista
-GROQ_MODEL_C = os.getenv("GROQ_MODEL_C", "llama-3.1-8b-instant")      # Executor rapido
+# Modelos descontinuados: mixtral-8x7b-32768, llama-3.1-70b-versatile
+# Modelos ativos confirmados via log de execução:
+GROQ_MODEL_A = os.getenv("GROQ_MODEL_A", "llama-3.3-70b-versatile")          # Estrategista
+GROQ_MODEL_B = os.getenv("GROQ_MODEL_B", "meta-llama/llama-4-scout-17b-16e-instruct")  # Analista
+GROQ_MODEL_C = os.getenv("GROQ_MODEL_C", "llama-3.1-8b-instant")             # Executor rápido
 
 # ── Risco ───────────────────────────────────────────────────────────────────
 MIN_STAKE        = float(os.getenv("MIN_STAKE",   "0.35"))

@@ -32,14 +32,19 @@ except ImportError:
     PatternAgent = None
 
 try:
-    from agents.council_agent import CouncilAgent
+    from agents.auditor_agent import AuditorAgent
 except ImportError:
-    CouncilAgent = None
+    AuditorAgent = None
+
 
 async def run_backend(deriv: DerivClient, app: QApplication) -> None:
     agent_log("SYSTEM", "=" * 60)
     agent_log("SYSTEM", "NEXUS QUANTUM ULTRA — INICIANDO")
     agent_log("SYSTEM", "=" * 60)
+
+    # ── 0. Inicia EventBus — OBRIGATÓRIO antes de tudo ─────────────────
+    asyncio.create_task(BUS.run(), name="event_bus")
+    await asyncio.sleep(0)  # cede o loop para o BUS inicializar
 
     # ── 1. Banco de dados ──────────────────────────────────────────────
     await init_db()
@@ -93,9 +98,9 @@ async def run_backend(deriv: DerivClient, app: QApplication) -> None:
     if PatternAgent:
         pattern = PatternAgent()
         agents.append(pattern)
-    if CouncilAgent:
-        council = CouncilAgent(deriv, executor)
-        agents.append(council)
+    if AuditorAgent:
+        auditor = AuditorAgent()
+        agents.append(auditor)
 
     # ── 6. Inicia todas as tasks ───────────────────────────────────────
     tasks = [asyncio.create_task(a.run(), name=type(a).__name__) for a in agents]
@@ -107,6 +112,11 @@ async def run_backend(deriv: DerivClient, app: QApplication) -> None:
         "agents": {type(a).__name__: a for a in agents},
         "deriv":  deriv,
     })
+
+    # ── 7b. NOVO: Emite SYSTEM_START para ativar arbitragem ──────────
+    await asyncio.sleep(1)  # Aguarda agentes processarem agents_ready
+    await BUS.emit(Events.SYSTEM_START, {})
+    agent_log("SYSTEM", "[OK] Sistema operacional — arbitragem ativa")
 
     # ── 8. Mantém backend vivo ─────────────────────────────────────────
     try:

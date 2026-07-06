@@ -78,8 +78,28 @@ def _build_logger() -> logging.Logger:
     if logger.handlers:
         return logger
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
+    # Força UTF-8 no stdout/stderr do Windows (evita UnicodeEncodeError com cp1252)
+    import io
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    # Console handler com encoding explícito
+    try:
+        ch = logging.StreamHandler(
+            io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+            if hasattr(sys.stdout, "buffer") else sys.stdout
+        )
+    except Exception:
+        ch = logging.StreamHandler(sys.stdout)
+
     ch.setFormatter(NexusFormatter())
     ch.setLevel(logging.DEBUG)
 

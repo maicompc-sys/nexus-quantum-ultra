@@ -20,7 +20,6 @@ from PyQt6.QtGui import QFont, QTextCursor, QColor
 from gui.panels.chart_panel   import ChartPanel
 from gui.panels.agents_panel  import AgentsPanel
 from gui.panels.risk_panel    import RiskPanel
-from gui.panels.council_panel import CouncilPanel
 from core.event_bus           import BUS, Events
 from utils.logger             import get_emitter, AGENT_COLORS
 
@@ -218,6 +217,7 @@ class MainWindow(QMainWindow):
         self._wins = self._losses = 0
         self._pnl  = 0.0
         self._trading = False
+        self._preload_started = False   # evita liberar o botão antes do preload terminar
 
         self.setWindowTitle("NEXUS QUANTUM ULTRA \u2014 AI Trading System")
         self.setMinimumSize(1400, 900)
@@ -227,9 +227,10 @@ class MainWindow(QMainWindow):
         self._connect_buttons()
         self._subscribe_events()
 
-        # Verifica apos 3s se preload ja terminou (caso evento tenha sido
-        # emitido antes da GUI estar pronta para receber)
-        QTimer.singleShot(3000, self._check_preload_already_done)
+        # Verifica apos 5s se preload ja terminou (caso evento tenha sido
+        # emitido antes da GUI estar pronta para receber).
+        # Só libera se o preload ainda não foi iniciado (conexão Deriv falhou).
+        QTimer.singleShot(5000, self._check_preload_already_done)
 
     # ── UI Setup ───────────────────────────────────────────────────────────
 
@@ -260,12 +261,10 @@ class MainWindow(QMainWindow):
 
         self.chart_panel   = ChartPanel()
         self.agents_panel  = AgentsPanel()
-        self.council_panel = CouncilPanel()
         self.trades_table  = TradesTable()
 
         tabs.addTab(self.chart_panel,   "\U0001f4c8  Gráfico")
         tabs.addTab(self.agents_panel,  "\U0001f916  Agentes")
-        tabs.addTab(self.council_panel, "\u2696\ufe0f  Conselho Groq")
         tabs.addTab(self.trades_table,  "\U0001f4cb  Trades")
 
         splitter.addWidget(tabs)
@@ -307,12 +306,11 @@ class MainWindow(QMainWindow):
         BUS.subscribe(Events.AGENT_STATUS, self._on_agent_status)
 
     def _check_preload_already_done(self):
-        """Se o preload ja terminou antes da GUI estar pronta, libera o botao."""
-        # Se a barra ainda estiver visivel e em 0%, o preload foi pulado
-        # (todas as series skip) ou terminou sem a GUI receber o evento.
-        # Libera o botao de qualquer forma.
-        if self.preload_bar.value() == 0 or self.preload_bar.value() == 100:
-            self._release_start_button("Pronto \u2014 clique em INICIAR para operar")
+        """Se o preload ja terminou antes da GUI estar pronta, libera o botao.
+        Mas APENAS se o preload nao foi iniciado (Deriv nao conectou)."""
+        if not self._preload_started:
+            # Deriv nao conectou em tempo — libera para operar mesmo assim
+            self._release_start_button("Pronto (sem preload) — clique em INICIAR para operar")
 
     def _release_start_button(self, msg: str = ""):
         self.preload_bar.setValue(100)
@@ -351,6 +349,7 @@ class MainWindow(QMainWindow):
     # ── Event Handlers ─────────────────────────────────────────────────────
 
     async def _on_preload_progress(self, _e: str, data: dict):
+        self._preload_started = True
         pct = int(data.get("progress", 0))
         def _update():
             self.preload_bar.setValue(pct)

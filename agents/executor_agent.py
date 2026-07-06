@@ -90,6 +90,7 @@ class ExecutorAgent:
                 "symbol":         symbol,
                 "contract_type":  direction,
                 "stake":          stake,
+                "duration":       5,          # 5 ticks (padrão)
                 "entry_price":    buy_price,
                 "confidence":     confidence,
                 "strategy_name":  strategy,

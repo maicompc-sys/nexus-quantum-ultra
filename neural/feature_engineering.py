@@ -40,7 +40,7 @@ def candles_to_features(candles: List[Dict]) -> Optional[np.ndarray]:
 
     _rsi    = rsi(closes, 14)
     _macd   = macd(closes)
-    _bb     = bollinger_bands(closes)
+    bb_upper, bb_mid, bb_lower = bollinger_bands(closes)   # retorna TUPLA, nao dict
     _atr    = atr(highs, lows, closes)
     _stoch  = stochastic(highs, lows, closes)
     _ema9   = ema(closes, 9)
@@ -63,10 +63,10 @@ def candles_to_features(candles: List[Dict]) -> Optional[np.ndarray]:
     features[:, 6] = _normalize(np.nan_to_num(_macd["histogram"]))
 
     # Bollinger position (0=at lower, 0.5=at mid, 1=at upper)
-    bb_range = _bb["upper"] - _bb["lower"]
+    bb_range = bb_upper - bb_lower
     bb_pos   = np.where(
         bb_range > 0,
-        (closes - _bb["lower"]) / bb_range,
+        (closes - bb_lower) / bb_range,
         0.5
     )
     features[:, 7] = np.clip(bb_pos, 0, 1)

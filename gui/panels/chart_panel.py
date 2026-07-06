@@ -79,7 +79,8 @@ class ChartPanel(QWidget):
         self.cmb_symbol.currentTextChanged.connect(self._on_symbol_change)
 
         self.cmb_gran = QComboBox()
-        self.cmb_gran.addItems(["1m", "5m", "15m", "1h"])
+        self.cmb_gran.addItems(["Tick", "1m", "5m", "15m", "1h"])
+        self.cmb_gran.setCurrentIndex(1) # default to 1m
         self.cmb_gran.currentIndexChanged.connect(self._on_gran_change)
 
         self.lbl_price = QLabel("\u2500\u2500\u2500\u2500\u2500\u2500")
@@ -124,7 +125,30 @@ class ChartPanel(QWidget):
     def _on_tick(self, _event: str, data: dict):
         if data.get("symbol") == self._symbol:
             price = data.get("price", 0)
+            epoch = data.get("epoch", 0)
             QTimer.singleShot(0, lambda: self.lbl_price.setText(f"  {price:.5f}  "))
+            
+            # Update live candle
+            if self._candles:
+                latest = self._candles[-1]
+                # Check if we should start a new candle
+                if epoch >= latest["epoch"] + self._granularity:
+                    new_candle = {
+                        "epoch": latest["epoch"] + self._granularity,
+                        "open": latest["close"],
+                        "high": price,
+                        "low": price,
+                        "close": price
+                    }
+                    self._candles.append(new_candle)
+                    if len(self._candles) > 200:
+                        self._candles.pop(0)
+                else:
+                    latest["high"] = max(latest["high"], price)
+                    latest["low"] = min(latest["low"], price)
+                    latest["close"] = price
+                    
+                QTimer.singleShot(0, self._draw)
 
     def _on_candle(self, _event: str, data: dict):
         if data.get("symbol") == self._symbol and data.get("gran", 60) == self._granularity:
@@ -135,8 +159,13 @@ class ChartPanel(QWidget):
         self._load_candles()
 
     def _on_gran_change(self, idx: int):
-        self._granularity = [60, 300, 900, 3600][idx]
-        self._load_candles()
+        self._granularity = [0, 60, 300, 900, 3600][idx]
+        if self._granularity == 0:
+            self._candles = []
+            self.price_plot.clear()
+            self.rsi_plot.clear()
+        else:
+            self._load_candles()
 
     def _load_candles(self):
         try:

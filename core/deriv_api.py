@@ -268,7 +268,7 @@ class DerivClient:
             fut = self._pending.pop(req_id)
             if not fut.done():
                 fut.set_result(msg)
-            return
+            # Removed early return to allow processing of the initial subscription payload
 
         if msg_type == "tick":
             t = msg.get("tick", {})

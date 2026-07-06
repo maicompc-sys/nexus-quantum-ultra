@@ -1,8 +1,3 @@
-"""
-NEXUS QUANTUM ULTRA — Agents Panel
-Live grid showing all 12 agents: status, signal, confidence, latency.
-"""
-
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGridLayout,
     QLabel, QFrame, QGroupBox, QProgressBar
@@ -16,8 +11,8 @@ from utils.logger import AGENT_COLORS
 
 AGENT_LIST = [
     "SENTINEL","QUANT","PATTERN","RISK","EXECUTOR",
-    "MEMORY","STRATEGY","AUDITOR","ARBITRATOR",
-    "ADAPTIVE","TIME","TELEGRAM","NEURAL","COUNCIL",
+    "MEMORY","STRATEGY","AUDITOR",
+    "ADAPTIVE","TIME","TELEGRAM","NEURAL",
 ]
 
 
@@ -120,29 +115,24 @@ class AgentsPanel(QWidget):
         BUS.subscribe(Events.AGENT_STATUS, self._on_status)
         BUS.subscribe(Events.AGENT_SIGNAL, self._on_signal)
         BUS.subscribe(Events.NN_DONE,      self._on_nn_done)
-        BUS.subscribe(Events.COUNCIL_DONE, self._on_council_done)
 
     async def _on_status(self, _e: str, data: dict):
-        agent = data.get("agent", "")
+        agent  = data.get("agent", "")
+        status = data.get("status", "idle")
         if agent in self._cards:
-            self._cards[agent].update_status(data.get("status", "idle"))
+            card = self._cards[agent]
+            QTimer.singleShot(0, lambda c=card, s=status: c.update_status(s))
 
     async def _on_signal(self, _e: str, data: dict):
-        agent = data.get("agent", "")
+        agent      = data.get("agent", "")
+        signal     = data.get("signal",     "HOLD")
+        confidence = data.get("confidence", 0.0)
         if agent in self._cards:
-            self._cards[agent].update_signal(
-                data.get("signal",     "HOLD"),
-                data.get("confidence", 0.0),
-            )
+            card = self._cards[agent]
+            QTimer.singleShot(0, lambda c=card, sg=signal, cf=confidence: c.update_signal(sg, cf))
 
     async def _on_nn_done(self, _e: str, data: dict):
         if "NEURAL" in self._cards:
-            acc = data.get("accuracy", 0.0)
-            self._cards["NEURAL"].update_signal("TRAINED", acc)
-
-    async def _on_council_done(self, _e: str, data: dict):
-        if "COUNCIL" in self._cards:
-            self._cards["COUNCIL"].update_signal(
-                data.get("signal",     "HOLD"),
-                data.get("confidence", 0.0),
-            )
+            acc  = data.get("accuracy", 0.0)
+            card = self._cards["NEURAL"]
+            QTimer.singleShot(0, lambda c=card, a=acc: c.update_signal("TRAINED", a))

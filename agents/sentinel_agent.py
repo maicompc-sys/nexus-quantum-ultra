@@ -29,7 +29,9 @@ class SentinelAgent:
         self._guards:  Dict[str, bool] = {}   # True = trading allowed
 
     def is_clear(self, symbol: str) -> bool:
-        return self._guards.get(symbol, False)
+        # Padrão True: libera trading até o sentinel ter dados suficientes para avaliar.
+        # Após _evaluate() rodar, o guard pode mudar para False se o regime for adverso.
+        return self._guards.get(symbol, True)
 
     def get_regime(self, symbol: str) -> str:
         return self._regimes.get(symbol, "unknown")

@@ -27,6 +27,7 @@ class RiskAgent:
         self._last_stake:     Dict[str, float] = {}
         self._consecutive_losses: Dict[str, int] = {}
         self._trading_halted = False
+        self._trades_count   = 0  # Contador para delay de proteção
 
         BUS.subscribe(Events.BALANCE_UPDATE, self._on_balance)
         BUS.subscribe(Events.TRADE_CLOSE,    self._on_trade_close)
@@ -49,8 +50,9 @@ class RiskAgent:
             self._consecutive_losses[symbol] = 0
             self._martingale_lvl[symbol]     = 0
 
-        # Drawdown check
-        if self._peak_balance > 0:
+        # ── Drawdown check — APENAS após 10+ trades (evita halt falso no início) ──
+        self._trades_count += 1
+        if self._trades_count > 10 and self._peak_balance > 0:
             drawdown = (self._peak_balance - self._balance) / self._peak_balance * 100
             if drawdown >= STOP_LOSS:
                 self._trading_halted = True
@@ -65,6 +67,11 @@ class RiskAgent:
         """Returns stake or None if trade should be blocked."""
         if self._trading_halted:
             agent_log(self.NAME, "Trading HALTED — stake negado", logging.WARNING)
+            return None
+
+        # Aguarda receber o saldo real antes de operar
+        if self._balance <= 0:
+            agent_log(self.NAME, "Saldo ainda não recebido — stake negado", logging.WARNING)
             return None
 
         if confidence < MIN_CONFIDENCE:

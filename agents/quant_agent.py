@@ -32,17 +32,25 @@ class QuantAgent:
         self._candles: Dict[str, Dict[int, List[Dict]]] = {}
         self._signals: Dict[str, Dict]                  = {}
         self._loaded   = False
+        # ── Construção de candles em tempo real ──────────────────
+        self._tick_buf: Dict[str, Dict[int, List[Dict]]] = {}  # symbol -> {epoch: [ticks]}
+        self._candle_state: Dict[str, Dict[int, Dict]] = {}     # symbol -> {gran: current_candle}
 
     async def run(self) -> None:
         self._running = True
         agent_log("QUANT", "Quant Agent iniciado.")
 
         # BUS.subscribe e sincrono - nao usar await
+        BUS.subscribe(Events.TICK,            self._on_tick)       # NOVO: escuta ticks
         BUS.subscribe(Events.CANDLE,          self._on_candle)
         BUS.subscribe(Events.PRELOAD_ALL,     self._on_preload_done)
         BUS.subscribe("system.agents_ready",  self._on_agents_ready)
 
         await self._load_all_candles()
+
+        # Analisa imediatamente após carregar — sem esperar o primeiro intervalo
+        if self._loaded:
+            await self._analyze_all()
 
         while self._running:
             await asyncio.sleep(ANALYSIS_INTERVAL)
@@ -58,6 +66,59 @@ class QuantAgent:
     async def _on_agents_ready(self, _event: str, data: Dict) -> None:
         if not self._loaded:
             await self._load_all_candles()
+
+    async def _on_tick(self, _event: str, data: Dict) -> None:
+        """Processa ticks e constrói candles em tempo real."""
+        symbol = data.get("symbol")
+        if not symbol:
+            return
+        
+        price = float(data.get("price", 0))
+        epoch = int(data.get("epoch", 0))
+        if epoch == 0 or price == 0:
+            return
+        
+        # Inicializa buffer do símbolo
+        if symbol not in self._tick_buf:
+            self._tick_buf[symbol] = {}
+            self._candle_state[symbol] = {}
+        
+        # Agrupa ticks por segundo (epoch)
+        if epoch not in self._tick_buf[symbol]:
+            self._tick_buf[symbol][epoch] = []
+        self._tick_buf[symbol][epoch].append(price)
+        
+        # Tenta construir candles para granularidades
+        for gran in PRELOAD_GRANULARITIES:
+            epoch_aligned = (epoch // gran) * gran
+            
+            # Inicializa candle state
+            if gran not in self._candle_state[symbol]:
+                self._candle_state[symbol][gran] = None
+            
+            # Atualiza ou cria candle
+            curr = self._candle_state[symbol][gran]
+            if curr is None or curr["epoch"] != epoch_aligned:
+                # Nova vela começou
+                if curr is not None:
+                    # Emite vela anterior completa
+                    await BUS.emit(Events.CANDLE, curr)
+                curr = {
+                    "symbol": symbol,
+                    "gran": gran,
+                    "epoch": epoch_aligned,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                }
+            else:
+                # Atualiza vela atual
+                curr["high"] = max(curr["high"], price)
+                curr["low"] = min(curr["low"], price)
+                curr["close"] = price
+            
+            self._candle_state[symbol][gran] = curr
 
     async def _on_candle(self, _event: str, data: Dict) -> None:
         symbol = data.get("symbol")
@@ -116,6 +177,11 @@ class QuantAgent:
                 signal = await self._analyze_symbol(symbol)
                 if signal:
                     self._signals[symbol] = signal
+                    agent_log(
+                        "QUANT",
+                        f"{symbol} | {signal['signal']} | conf={signal['confidence']:.2f} | "
+                        f"score_call={signal['score_call']} score_put={signal['score_put']}"
+                    )
                     await BUS.emit(Events.AGENT_SIGNAL, signal)
             except Exception as e:
                 agent_log("QUANT", f"Erro analise {symbol}: {e}", logging.ERROR)
